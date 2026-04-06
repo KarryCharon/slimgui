@@ -19,20 +19,15 @@ nanobind_add_module(slimgui_ext
   NB_DOMAIN slimgui_abi_domain
 
   src/slimgui_ext.cpp
-  src/implot_bindings.cpp
 
   src/c/imgui/imgui.cpp
   src/c/imgui/imgui_demo.cpp
   src/c/imgui/imgui_draw.cpp
   src/c/imgui/imgui_tables.cpp
   src/c/imgui/imgui_widgets.cpp
-
-  src/c/implot/implot.cpp
-  src/c/implot/implot_items.cpp
-  src/c/implot/implot_demo.cpp
 )
 
-# TODO the below works too, should get rid of the docs mangling in full_builld.sh.
+# TODO the below works too, should get rid of the docs mangling in full_build.sh.
 # nanobind_add_stub(
 #     slimgui_ext_stub
 #     MODULE slimgui_ext
@@ -43,11 +38,9 @@ nanobind_add_module(slimgui_ext
 #     OUTPUT 
 #         "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/__init__.pyi"
 #         "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/imgui.pyi"
-#         "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/implot.pyi"
 # )
 
 include_directories(${CMAKE_SOURCE_DIR}/src/c/imgui)
-include_directories(${CMAKE_SOURCE_DIR}/src/c/implot)
 
 if(APPLE)
   # Used by the default implementation for macOS clipboard access.
@@ -59,4 +52,3 @@ endif()
 install(TARGETS slimgui_ext LIBRARY DESTINATION slimgui)
 install(FILES "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/__init__.pyi" DESTINATION slimgui/slimgui_ext/)
 install(FILES "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/imgui.pyi" DESTINATION slimgui/slimgui_ext/)
-install(FILES "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/implot.pyi" DESTINATION slimgui/slimgui_ext/)

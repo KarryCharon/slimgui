@@ -7,15 +7,7 @@ subtitle: 'Python bindings for Dear ImGui'
 
 ## Overview
 
-The Slimgui package provides modern Python bindings for the following libraries:
-
- - [Dear ImGui](https://github.com/ocornut/imgui)
- - [ImPlot](https://github.com/epezent/implot)
-
-The Python bindings documentation has been split into several parts:
-
-- Dear ImGui bindings reference -- you're reading it.
-- [ImPlot bindings API reference](./apiref_implot.html)
+The Slimgui package provides modern Python bindings for [Dear ImGui](https://github.com/ocornut/imgui).
 
 The project source code is hosted on [github.com/nurpax/slimgui](https://github.com/nurpax/slimgui).
 
@@ -335,10 +327,6 @@ Tip: the `color_edit_*` functions have a little color square that can be left-cl
 
 #### Functions
 <div class="raw-html-insert" data-apirefs="begin_list_box, end_list_box, list_box"></div>
-
-### Widgets: Data Plotting
-
-Consider using [ImPlot](https://github.com/epezent/implot) which is much better!  Slimgui includes ImPlot bindings, see [Slimgui ImPlot API reference](./apiref_implot.html) for details.
 
 #### Functions
 <div class="raw-html-insert" data-apirefs="plot_lines, plot_histogram"></div>

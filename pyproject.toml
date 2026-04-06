@@ -25,11 +25,15 @@ Repository = "https://github.com/nurpax/slimgui"
 imgui_version = "1.92.4"
 
 [tool.pytest.ini_options]
-testpaths = [ "tests", "gen" ]
+testpaths = [ "tests" ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3.3",
+    "litgen>=0.22.0",
+    "markdown>=3.10",
+    "toml>=0.10",
+    "requests>=2.31",
 ]
 
 [tool.scikit-build]
@@ -41,6 +45,9 @@ build-dir = "build/{wheel_tag}"
 
 # Build stable ABI wheels for CPython 3.12+
 wheel.py-api = "cp312"
+
+# Editable install: redirect imports to build dir
+editable.mode = "redirect"
 
 # cmake.build-type = "Debug"
 

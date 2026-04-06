@@ -1,38 +1,36 @@
 # Development
 
-Prerequisites:
-- clang-format for generating enums
-  - macOS: `brew install clang-format`
-
-MacOS:
+## Setup
 
 ```
 python3 -m venv .venv
 . .venv/bin/activate
-pip install nanobind==2.9.2 scikit-build-core click glfw pyopengl numpy requests toml
-bash full_build.sh
+pip install nanobind==2.9.2 scikit-build-core litgen glfw pyopengl numpy toml
+pip install -e --no-build-isolation .
 ```
 
-## How to run tests
+## Build
 
 ```
-# in project root directory:
+python tools/gen_bindings.py --full
+```
+
+This single command runs the full pipeline: generate bindings, compile, generate stubs, and build docs.
+
+Use `--stubs` instead of `--full` to skip docs generation.
+Use no flags to only regenerate the `.inl` files.
+
+## Test
+
+```
 pytest
 ```
 
-## Docs build with filewatching
+## Updating imgui
+
+Edit `tools/imgui_vendor.py` to set the new version, then:
 
 ```
-npx nodemon -w gen -w docs/template.html -w docs/apiref.md -x python gen/build_docs.py --module slimgui.imgui --pyi-file src/slimgui/slimgui_ext/imgui.pyi --output dist/index.html docs/apiref.md
+python tools/imgui_vendor.py
+python tools/gen_bindings.py --full
 ```
-
-## Updating imgui and cimgui metainfo when upgrading imgui
-
-Edit the `imgui_vendor.py` script to pull newer versions and then:
-
-```
-cd $ROOT_DIR
-python gen/imgui_vendor.py
-```
-
-You need to also git cherry-pick imconfig related changes + do a `full_rebuild.sh` to update enums.  See git log for reference.
