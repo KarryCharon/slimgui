@@ -11,14 +11,13 @@
 #include <iterator>
 #include <vector>
 #include <array>
+#include <unordered_map>
 
 #include "imgui.h"
 #include "imgui_internal.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
-
-extern void implot_bindings(nb::module_& implot);  // implot_bindings.cpp
 
 #include "type_casts.h"
 
@@ -42,8 +41,7 @@ auto array_to_tuple(const std::array<T, N>& arr) {
 struct InputTextCallback_UserData
 {
     std::string*            Str;
-    ImGuiInputTextCallback  ChainCallback;
-    void*                   ChainCallbackUserData;
+    nb::callable*           ChainCallback;  // Python callable or nullptr
 };
 
 // Function to find the Nth occurrence of '/' or '\' from the end of the string
@@ -80,8 +78,7 @@ static int InputTextCallback(ImGuiInputTextCallbackData* data)
     InputTextCallback_UserData* user_data = (InputTextCallback_UserData*)data->UserData;
     if (data->EventFlag == ImGuiInputTextFlags_CallbackResize)
     {
-        // Resize string callback
-        // If for some reason we refuse the new length (BufTextLen) and/or capacity (BufSize) we need to set them back to what we want.
+        // Resize string callback (internal, always handled)
         std::string* str = user_data->Str;
         IM_ASSERT(data->Buf == str->c_str());
         str->resize(data->BufTextLen);
@@ -89,37 +86,87 @@ static int InputTextCallback(ImGuiInputTextCallbackData* data)
     }
     else if (user_data->ChainCallback)
     {
-        // Forward to user callback, if any
-        data->UserData = user_data->ChainCallbackUserData;
-        return user_data->ChainCallback(data);
+        // Forward to user Python callback
+        try {
+            auto result = (*user_data->ChainCallback)(data);
+            if (!result.is_none()) {
+                return nb::cast<int>(result);
+            }
+        } catch (nb::python_error& e) {
+            e.discard_as_unraisable("InputTextCallback python callback");
+        } catch (nb::cast_error& e) {
+            nb::raise_python_error();
+        }
     }
     return 0;
 }
 
 struct ContextBackendData {
-    struct SizeConstraints {
-        void* callable_ptr;
-        uint64_t int_user_data;
-    } size_constraints;
+    nb::object size_constraints_callback;
+    // PlatformIO hook callable pointers (prevent GC via WrappedContext Python side)
+    nb::object platform_get_clipboard_text_fn;
+    nb::object platform_set_clipboard_text_fn;
+    nb::object platform_open_in_shell_fn;
+    nb::object platform_set_ime_data_fn;
+    // Stored clipboard text returned by get_clipboard callback (must outlive the returned const char*)
+    std::string clipboard_text_buf;
+    // Selection adapter callable refs (prevent GC, keyed by Selection* pointer)
+    std::unordered_map<void*, nb::object> selection_adapter_refs;
 };
 
 static void window_size_constraints_callback_py_wrapper(ImGuiSizeCallbackData* cb_data) {
-    ContextBackendData* userdata = static_cast<ContextBackendData*>(cb_data->UserData);
-    auto callable_ptr = static_cast<PyObject*>(userdata->size_constraints.callable_ptr);
+    ContextBackendData* bd = static_cast<ContextBackendData*>(cb_data->UserData);
     try {
-        auto res = nb::borrow<nb::callable>(callable_ptr)(cb_data->Pos, cb_data->CurrentSize, cb_data->DesiredSize, userdata->size_constraints.int_user_data);
-        cb_data->DesiredSize = nb::cast<ImVec2>(res);
+        nb::borrow<nb::callable>(bd->size_constraints_callback)(cb_data);
     } catch (nb::python_error& e) {
         e.discard_as_unraisable("window_size_constraints_callback_py_wrapper callback");
         return;
     } catch (nb::cast_error& e) {
-        PyErr_SetString(PyExc_RuntimeError, "window_size_constraints_callback_py_wrapper callback cast error");
-        PyErr_WriteUnraisable(callable_ptr);
-        return;
+        nb::chain_error(PyExc_RuntimeError, "window_size_constraints_callback_py_wrapper callback cast error");
+        nb::raise_python_error();
     }
 }
-
-
+// PlatformIO hook wrappers
+static const char* platform_get_clipboard_text_py_wrapper(ImGuiContext* ctx) {
+    ImGuiIO& io = ImGui::GetIO(ctx);
+    ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+    try {
+        nb::object result = nb::borrow<nb::callable>(bd->platform_get_clipboard_text_fn)(/* no args */);
+        bd->clipboard_text_buf = nb::cast<std::string>(result);
+        return bd->clipboard_text_buf.c_str();
+    } catch (nb::python_error& e) {
+        e.discard_as_unraisable("platform_get_clipboard_text_fn callback");
+        return "";
+    }
+}
+static void platform_set_clipboard_text_py_wrapper(ImGuiContext* ctx, const char* text) {
+    ImGuiIO& io = ImGui::GetIO(ctx);
+    ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+    try {
+        nb::borrow<nb::callable>(bd->platform_set_clipboard_text_fn)(text);
+    } catch (nb::python_error& e) {
+        e.discard_as_unraisable("platform_set_clipboard_text_fn callback");
+    }
+}
+static bool platform_open_in_shell_py_wrapper(ImGuiContext* ctx, const char* path) {
+    ImGuiIO& io = ImGui::GetIO(ctx);
+    ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+    try {
+        return nb::cast<bool>(nb::borrow<nb::callable>(bd->platform_open_in_shell_fn)(path));
+    } catch (nb::python_error& e) {
+        e.discard_as_unraisable("platform_open_in_shell_fn callback");
+        return false;
+    }
+}
+static void platform_set_ime_data_py_wrapper(ImGuiContext* ctx, ImGuiViewport* viewport, ImGuiPlatformImeData* data) {
+    ImGuiIO& io = ImGui::GetIO(ctx);
+    ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+    try {
+        nb::borrow<nb::callable>(bd->platform_set_ime_data_fn)(viewport, data);
+    } catch (nb::python_error& e) {
+        e.discard_as_unraisable("platform_set_ime_data_fn callback");
+    }
+}
 static void drawlist_callback_py_wrapper(const ImDrawList* parent_list, const ImDrawCmd* cmd) {
     auto callable_ptr = static_cast<PyObject*>(((void**)cmd->UserCallbackData)[0]);
     try {
@@ -145,14 +192,11 @@ static void drawlist_callback_py_wrapper(const ImDrawList* parent_list, const Im
     } catch (nb::python_error& e) {
         e.discard_as_unraisable("drawlist_callback_py_wrapper callback");
         return;
-    } catch (nb::cast_error& e) {
-        PyErr_SetString(PyExc_RuntimeError, "drawlist_callback_py_wrapper callback cast error");
-        PyErr_WriteUnraisable(callable_ptr);
-        return;
+    } catch (nb::cast_error&) {
+        nb::chain_error(PyExc_RuntimeError, "drawlist_callback_py_wrapper callback cast error");
+        nb::raise_python_error();
     }
 }
-
-
 // Used as the type for nanobind instead of binding ImGuiContext directly.  Binding
 // ImGuiContext directly triggers ocornut/imgui#7676
 struct Context {
@@ -456,12 +500,172 @@ NB_MODULE(slimgui_ext, top) {
         .def_ro("key_alt", &ImGuiIO::KeyAlt)
         .def_ro("key_super", &ImGuiIO::KeySuper);
 
+    nb::class_<ImGuiPlatformImeData>(m, "PlatformImeData", "Platform IME data for io.platform_set_ime_data_fn() function.")
+        .def_ro("want_visible", &ImGuiPlatformImeData::WantVisible, "A widget wants the IME to be visible.")
+        .def_ro("input_pos", &ImGuiPlatformImeData::InputPos, "Position of the input cursor.")
+        .def_ro("input_line_height", &ImGuiPlatformImeData::InputLineHeight, "Line height.");
+
+    nb::class_<ImGuiSelectionRequest>(m, "SelectionRequest", "A selection request from BeginMultiSelect()/EndMultiSelect().")
+        .def_ro("type", &ImGuiSelectionRequest::Type, "Request type.")
+        .def_ro("selected", &ImGuiSelectionRequest::Selected, "Parameter for SetAll/SetRange (true=select, false=unselect).")
+        .def_ro("range_direction", &ImGuiSelectionRequest::RangeDirection, "+1 forward, -1 backward.")
+        .def_ro("range_first_item", &ImGuiSelectionRequest::RangeFirstItem, "First item for SetRange request.")
+        .def_ro("range_last_item", &ImGuiSelectionRequest::RangeLastItem, "Last item for SetRange request (inclusive).");
+
+    nb::class_<ImGuiMultiSelectIO>(m, "MultiSelectIO", "Main IO structure returned by BeginMultiSelect()/EndMultiSelect().")
+        .def_prop_ro("requests", [](ImGuiMultiSelectIO* ms_io) {
+            return nb::make_iterator(nb::type<ImGuiMultiSelectIO>(), "iterator", ms_io->Requests.begin(), ms_io->Requests.end());
+        }, nb::keep_alive<0, 1>(), "Selection requests to process.")
+        .def_rw("range_src_item", &ImGuiMultiSelectIO::RangeSrcItem, "Source item that must not be clipped.")
+        .def_rw("nav_id_item", &ImGuiMultiSelectIO::NavIdItem, "Last known SetNextItemSelectionUserData() value for NavId.")
+        .def_rw("nav_id_selected", &ImGuiMultiSelectIO::NavIdSelected, "Whether NavId item is currently selected.")
+        .def_rw("range_src_reset", &ImGuiMultiSelectIO::RangeSrcReset, "Set before EndMultiSelect() to reset RangeSrcItem.")
+        .def_ro("items_count", &ImGuiMultiSelectIO::ItemsCount, "items_count passed to BeginMultiSelect().");
+
+    nb::class_<ImGuiSelectionBasicStorage>(m, "SelectionBasicStorage", "Optional helper to store multi-selection state.")
+        .def(nb::init<>())
+        .def_rw("preserve_order", &ImGuiSelectionBasicStorage::PreserveOrder)
+        .def("get_adapter_index_to_storage_id", [](ImGuiSelectionBasicStorage* self) -> nb::object {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                auto* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                auto it = bd->selection_adapter_refs.find(self);
+                if (it == bd->selection_adapter_refs.end()) return nb::none();
+                return it->second;
+            })
+        .def("set_adapter_index_to_storage_id", [](ImGuiSelectionBasicStorage* self, nb::object fn) {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                auto* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (fn.is_none()) {
+                    bd->selection_adapter_refs.erase(self);
+                    self->AdapterIndexToStorageId = nullptr;
+                    self->UserData = nullptr;
+                } else {
+                    bd->selection_adapter_refs[self] = fn;
+                    self->UserData = fn.ptr();
+                    self->AdapterIndexToStorageId = [](ImGuiSelectionBasicStorage* self, int idx) -> ImGuiID {
+                        auto py_fn = nb::borrow<nb::callable>(static_cast<PyObject*>(self->UserData));
+                        try {
+                            return nb::cast<ImGuiID>(py_fn(idx));
+                        } catch (nb::python_error& e) {
+                            e.discard_as_unraisable("SelectionBasicStorage.adapter_index_to_storage_id");
+                            return (ImGuiID)idx;
+                        }
+                    };
+                }
+            }, "fn"_a=nb::none())
+        .def("apply_requests", &ImGuiSelectionBasicStorage::ApplyRequests, "ms_io"_a)
+        .def("contains", &ImGuiSelectionBasicStorage::Contains, "id"_a)
+        .def("clear", &ImGuiSelectionBasicStorage::Clear)
+        .def("swap", &ImGuiSelectionBasicStorage::Swap, "other"_a)
+        .def("set_item_selected", &ImGuiSelectionBasicStorage::SetItemSelected, "id"_a, "selected"_a)
+        .def("get_storage_id_from_index", &ImGuiSelectionBasicStorage::GetStorageIdFromIndex, "idx"_a)
+        .def_prop_ro("size", [](const ImGuiSelectionBasicStorage* self) { return self->_Storage.Data.Size; }, "Number of selected items.");
+
+    nb::class_<ImGuiSelectionExternalStorage>(m, "SelectionExternalStorage", "Optional helper to apply multi-selection requests to existing storage.")
+        .def(nb::init<>())
+        .def("get_adapter_set_item_selected", [](ImGuiSelectionExternalStorage* self) -> nb::object {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                auto* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                auto it = bd->selection_adapter_refs.find(self);
+                if (it == bd->selection_adapter_refs.end()) return nb::none();
+                return it->second;
+            })
+        .def("set_adapter_set_item_selected", [](ImGuiSelectionExternalStorage* self, nb::object fn) {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                auto* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (fn.is_none()) {
+                    bd->selection_adapter_refs.erase(self);
+                    self->AdapterSetItemSelected = nullptr;
+                    self->UserData = nullptr;
+                } else {
+                    bd->selection_adapter_refs[self] = fn;
+                    self->UserData = fn.ptr();
+                    self->AdapterSetItemSelected = [](ImGuiSelectionExternalStorage* self, int idx, bool selected) {
+                        auto py_fn = nb::borrow<nb::callable>(static_cast<PyObject*>(self->UserData));
+                        try {
+                            py_fn(idx, selected);
+                        } catch (nb::python_error& e) {
+                            e.discard_as_unraisable("SelectionExternalStorage.adapter_set_item_selected");
+                        }
+                    };
+                }
+            }, "fn"_a=nb::none())
+        .def("apply_requests", &ImGuiSelectionExternalStorage::ApplyRequests, "ms_io"_a);
+
     nb::class_<ImGuiPlatformIO>(m, "PlatformIO")
         .def_rw("renderer_texture_max_width", &ImGuiPlatformIO::Renderer_TextureMaxWidth)
         .def_rw("renderer_texture_max_height", &ImGuiPlatformIO::Renderer_TextureMaxHeight)
         .def_prop_ro("textures", [](ImGuiPlatformIO* plat_io) {
             return nb::make_iterator(nb::type<ImGuiPlatformIO>(), "iterator", plat_io->Textures.begin(), plat_io->Textures.end());
-        }, nb::keep_alive<0, 1>());
+        }, nb::keep_alive<0, 1>())
+        .def("_get_platform_get_clipboard_text_fn", [](ImGuiPlatformIO* plat_io) -> nb::object {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (bd->platform_get_clipboard_text_fn.is_none()) return nb::none();
+                return bd->platform_get_clipboard_text_fn;
+            })
+        .def("_set_platform_get_clipboard_text_fn", [](ImGuiPlatformIO* plat_io, nb::object fn) {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (fn.is_none()) {
+                    bd->platform_get_clipboard_text_fn = nb::none();
+                    plat_io->Platform_GetClipboardTextFn = nullptr;
+                } else {
+                    bd->platform_get_clipboard_text_fn = fn;
+                    plat_io->Platform_GetClipboardTextFn = &platform_get_clipboard_text_py_wrapper;
+                }
+            }, "fn"_a=nb::none())
+        .def("_get_platform_set_clipboard_text_fn", [](ImGuiPlatformIO* plat_io) -> nb::object {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (bd->platform_set_clipboard_text_fn.is_none()) return nb::none();
+                return bd->platform_set_clipboard_text_fn;
+            })
+        .def("_set_platform_set_clipboard_text_fn", [](ImGuiPlatformIO* plat_io, nb::object fn) {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (fn.is_none()) {
+                    bd->platform_set_clipboard_text_fn = nb::none();
+                    plat_io->Platform_SetClipboardTextFn = nullptr;
+                } else {
+                    bd->platform_set_clipboard_text_fn = fn;
+                    plat_io->Platform_SetClipboardTextFn = &platform_set_clipboard_text_py_wrapper;
+                }
+            }, "fn"_a=nb::none())
+        .def("_get_platform_open_in_shell_fn", [](ImGuiPlatformIO* plat_io) -> nb::object {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (bd->platform_open_in_shell_fn.is_none()) return nb::none();
+                return bd->platform_open_in_shell_fn;
+            })
+        .def("_set_platform_open_in_shell_fn", [](ImGuiPlatformIO* plat_io, nb::object fn) {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (fn.is_none()) {
+                    bd->platform_open_in_shell_fn = nb::none();
+                    plat_io->Platform_OpenInShellFn = nullptr;
+                } else {
+                    bd->platform_open_in_shell_fn = fn;
+                    plat_io->Platform_OpenInShellFn = &platform_open_in_shell_py_wrapper;
+                }
+            }, "fn"_a=nb::none())
+        .def("_get_platform_set_ime_data_fn", [](ImGuiPlatformIO* plat_io) -> nb::object {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (bd->platform_set_ime_data_fn.is_none()) return nb::none();
+                return bd->platform_set_ime_data_fn;
+            })
+        .def("_set_platform_set_ime_data_fn", [](ImGuiPlatformIO* plat_io, nb::object fn) {
+                ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
+                ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+                if (fn.is_none()) {
+                    bd->platform_set_ime_data_fn = nb::none();
+                    plat_io->Platform_SetImeDataFn = nullptr;
+                } else {
+                    bd->platform_set_ime_data_fn = fn;
+                    plat_io->Platform_SetImeDataFn = &platform_set_ime_data_py_wrapper;
+                }
+            }, "fn"_a=nb::none());
 
     nb::class_<ImTextureRect>(m, "TextureRect")
         .def_ro("x", &ImTextureRect::x, "Upper-left x-coordinate of rectangle to update")
@@ -493,6 +697,45 @@ NB_MODULE(slimgui_ext, top) {
         .def("get_tex_id", &ImTextureData::GetTexID, "Backend-specific texture identifier.")
         .def("set_tex_id", &ImTextureData::SetTexID, "Call after creating or destroying the texture.")
         .def("set_status", &ImTextureData::SetStatus, "Call after honoring a request. Never modify `TextureData.status` directly!");
+
+    nb::class_<ImGuiSizeCallbackData>(m, "SizeCallbackData", "Callback data for SetNextWindowSizeConstraints().")
+        .def_prop_ro("pos", [](const ImGuiSizeCallbackData* d) { return d->Pos; }, "Window position, for reference.")
+        .def_prop_ro("current_size", [](const ImGuiSizeCallbackData* d) { return d->CurrentSize; }, "Current window size.")
+        .def_prop_rw("desired_size",
+            [](const ImGuiSizeCallbackData* d) { return d->DesiredSize; },
+            [](ImGuiSizeCallbackData* d, ImVec2 v) { d->DesiredSize = v; },
+            "Desired size, based on mouse position. Write to this field to restrain resizing.");
+
+    nb::class_<ImGuiInputTextCallbackData>(m, "InputTextCallbackData", "Shared state of InputText() when using custom callback.")
+        .def_prop_ro("event_flag", [](const ImGuiInputTextCallbackData* d) { return (ImGuiInputTextFlags_)d->EventFlag; }, "One of ImGuiInputTextFlags_Callback* indicating which event triggered the callback.")
+        .def_prop_ro("flags", [](const ImGuiInputTextCallbackData* d) { return (ImGuiInputTextFlags_)d->Flags; }, "What user passed to InputText().")
+        .def_prop_rw("event_char",
+            [](const ImGuiInputTextCallbackData* d) -> int { return (int)d->EventChar; },
+            [](ImGuiInputTextCallbackData* d, int c) { d->EventChar = (ImWchar)c; },
+            "Character input. Read-write. Replace character with another one, or set to zero to drop. (For CallbackCharFilter)")
+        .def_prop_ro("event_key", [](const ImGuiInputTextCallbackData* d) { return d->EventKey; }, "Key pressed (Up/Down/TAB). Read-only. (For CallbackCompletion/CallbackHistory)")
+        .def_prop_ro("buf", [](const ImGuiInputTextCallbackData* d) { return std::string(d->Buf, d->BufTextLen); }, "Current text buffer contents.")
+        .def_prop_ro("buf_text_len", [](const ImGuiInputTextCallbackData* d) { return d->BufTextLen; }, "Current text length in bytes.")
+        .def_prop_rw("cursor_pos",
+            [](const ImGuiInputTextCallbackData* d) { return d->CursorPos; },
+            [](ImGuiInputTextCallbackData* d, int v) { d->CursorPos = v; },
+            "Read-write. Cursor position in bytes.")
+        .def_prop_rw("selection_start",
+            [](const ImGuiInputTextCallbackData* d) { return d->SelectionStart; },
+            [](ImGuiInputTextCallbackData* d, int v) { d->SelectionStart = v; },
+            "Read-write. Selection start in bytes.")
+        .def_prop_rw("selection_end",
+            [](const ImGuiInputTextCallbackData* d) { return d->SelectionEnd; },
+            [](ImGuiInputTextCallbackData* d, int v) { d->SelectionEnd = v; },
+            "Read-write. Selection end in bytes.")
+        .def("delete_chars", &ImGuiInputTextCallbackData::DeleteChars, "pos"_a, "bytes_count"_a,
+            "Delete bytes_count bytes at position pos. Resets selection.")
+        .def("insert_chars", [](ImGuiInputTextCallbackData* d, int pos, const char* text) {
+            d->InsertChars(pos, text);
+        }, "pos"_a, "text"_a, "Insert text at position pos. Resets selection.")
+        .def("select_all", &ImGuiInputTextCallbackData::SelectAll, "Select all text.")
+        .def("clear_selection", &ImGuiInputTextCallbackData::ClearSelection, "Clear selection.")
+        .def("has_selection", &ImGuiInputTextCallbackData::HasSelection, "Returns true if there is a selection.");
 
     nb::enum_<DrawListCallbackResult>(m, "DrawListCallbackResult", "Return value for `DrawCmd.run_callback()` that's used in backend renderers.")
         .value("DRAW", DrawListCallbackResult::DRAW, "No callback, backend should draw elements.")
@@ -533,6 +776,64 @@ NB_MODULE(slimgui_ext, top) {
         .def_prop_ro("idx_buffer_data", [](const ImDrawList* drawList) {
             return (uintptr_t)drawList->IdxBuffer.Data;
         })
+        .def("get_render_data", [](const ImDrawList* drawList) -> nb::tuple {
+            const int vtx_count = drawList->VtxBuffer.Size;
+            const int idx_count = drawList->IdxBuffer.Size;
+            const int cmd_count = drawList->CmdBuffer.Size;
+            const ImDrawVert* vtx_src = drawList->VtxBuffer.Data;
+            const ImDrawIdx*  idx_src = drawList->IdxBuffer.Data;
+            const ImDrawCmd*  cmd_src = drawList->CmdBuffer.Data;
+
+            // --- 顶点数据: 拆分 AoS → SoA ---
+            float*    pos_data = new float[vtx_count * 2];
+            float*    uv_data  = new float[vtx_count * 2];
+            uint8_t*  col_data = new uint8_t[vtx_count * 4];
+            for (int i = 0; i < vtx_count; i++) {
+                pos_data[i * 2]     = vtx_src[i].pos.x;
+                pos_data[i * 2 + 1] = vtx_src[i].pos.y;
+                uv_data[i * 2]      = vtx_src[i].uv.x;
+                uv_data[i * 2 + 1]  = vtx_src[i].uv.y;
+                uint32_t c = vtx_src[i].col;
+                col_data[i * 4]     = (uint8_t)(c);
+                col_data[i * 4 + 1] = (uint8_t)(c >> 8);
+                col_data[i * 4 + 2] = (uint8_t)(c >> 16);
+                col_data[i * 4 + 3] = (uint8_t)(c >> 24);
+            }
+
+            // --- 用 capsule 管理顶点内存生命周期 ---
+            size_t vn2 = (size_t)vtx_count;
+            nb::capsule pos_owner(pos_data, [](void* p) noexcept { delete[] (float*)p; });
+            nb::capsule uv_owner(uv_data,  [](void* p) noexcept { delete[] (float*)p; });
+            nb::capsule col_owner(col_data, [](void* p) noexcept { delete[] (uint8_t*)p; });
+
+            auto positions = nb::ndarray<nb::numpy, float,   nb::ndim<2>>(pos_data, {vn2, 2}, pos_owner);
+            auto uvs       = nb::ndarray<nb::numpy, float,   nb::ndim<2>>(uv_data,  {vn2, 2}, uv_owner);
+            auto colors    = nb::ndarray<nb::numpy, uint8_t, nb::ndim<2>>(col_data, {vn2, 4}, col_owner);
+
+            // --- 命令数据: 返回 Python list of (tex_id, clip_tuple, indices_ndarray) ---
+            nb::list cmd_list;
+            for (int i = 0; i < cmd_count; i++) {
+                int64_t tex_id = (int64_t)cmd_src[i].TexRef.GetTexID();
+                auto clip = nb::make_tuple(
+                    cmd_src[i].ClipRect.x, cmd_src[i].ClipRect.y,
+                    cmd_src[i].ClipRect.z, cmd_src[i].ClipRect.w
+                );
+                // 预切索引: uint16 → int32, 每个 cmd 独立数组
+                int elem = (int)cmd_src[i].ElemCount;
+                int off  = (int)cmd_src[i].IdxOffset;
+                int32_t* sub_idx = new int32_t[elem];
+                for (int j = 0; j < elem; j++) {
+                    sub_idx[j] = (int32_t)idx_src[off + j];
+                }
+                nb::capsule sub_owner(sub_idx, [](void* p) noexcept { delete[] (int32_t*)p; });
+                auto idx_arr = nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(sub_idx, {(size_t)elem}, sub_owner);
+                cmd_list.append(nb::make_tuple(tex_id, clip, idx_arr));
+            }
+
+            return nb::make_tuple(positions, uvs, colors, cmd_list);
+        }, "Pack vertex/index/command data into numpy arrays in one C++ call.\n"
+           "Returns: (positions[N,2], uvs[N,2], colors[N,4](u8),\n"
+           "          [(tex_id, (x1,y1,x2,y2), indices[M](i32)), ...])")
         .def_prop_ro("commands", [](const ImDrawList* drawList) {
             return nb::make_iterator(nb::type<const ImDrawList*>(), "iterator", drawList->CmdBuffer.begin(), drawList->CmdBuffer.end());
         }, nb::keep_alive<0, 1>())
@@ -631,35 +932,34 @@ NB_MODULE(slimgui_ext, top) {
         .def("channels_split", &ImDrawList::ChannelsSplit, "count"_a)
         .def("channels_merge", &ImDrawList::ChannelsMerge)
         .def("channels_set_current", &ImDrawList::ChannelsSetCurrent, "n"_a)
-        .def("add_callback", [](ImDrawList* drawList, std::variant<int, DrawListCallbackCallable> cbv, std::variant<int64_t, nb::bytes> userdatav) {
-            if (int* v = std::get_if<int>(&cbv)) {
-                IM_ASSERT(*v == (intptr_t)ImDrawCallback_ResetRenderState);
-                drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr, 0);
-            } else {
-                const void* cb_ptr = (const void*)std::get<DrawListCallbackCallable>(cbv).ptr();
-                if (nb::bytes* bytes = std::get_if<nb::bytes>(&userdatav)) {
-                    intptr_t tmp[256];
-                    int64_t required_size = sizeof(intptr_t) + bytes->size();
+        .def("add_callback", [](ImDrawList* drawList, DrawListCallbackCallable cb, std::variant<int64_t, nb::bytes> userdatav) {
+            const void* cb_ptr = (const void*)cb.ptr();
+            if (nb::bytes* bytes = std::get_if<nb::bytes>(&userdatav)) {
+                intptr_t tmp[256];
+                int64_t required_size = sizeof(intptr_t) + bytes->size();
 
-                    tmp[0] = (intptr_t)cb_ptr | 1;
+                tmp[0] = (intptr_t)cb_ptr | 1;
 
-                    // Need a temp heap alloc
-                    if (required_size > sizeof(tmp)) {
-                        std::vector<uint8_t> buf(required_size);
-                        memcpy(&buf[0], tmp, sizeof(intptr_t));
-                        memcpy(&buf[sizeof(intptr_t)], bytes->c_str(), bytes->size());
-                        drawList->AddCallback(&drawlist_callback_py_wrapper, &buf[0], required_size);
-                    } else {
-                        memcpy(tmp + 1, bytes->c_str(), bytes->size());
-                        drawList->AddCallback(&drawlist_callback_py_wrapper, tmp, required_size);
-                    }
+                // Need a temp heap alloc
+                if (required_size > (int64_t)sizeof(tmp)) {
+                    std::vector<uint8_t> buf(required_size);
+                    memcpy(&buf[0], tmp, sizeof(intptr_t));
+                    memcpy(&buf[sizeof(intptr_t)], bytes->c_str(), bytes->size());
+                    drawList->AddCallback(&drawlist_callback_py_wrapper, &buf[0], required_size);
                 } else {
-                    int64_t userdata_int = std::get<int64_t>(userdatav);
-                    intptr_t userdata[2] = { (intptr_t)cb_ptr, userdata_int };
-                    drawList->AddCallback(&drawlist_callback_py_wrapper, userdata, sizeof(userdata));
+                    memcpy(tmp + 1, bytes->c_str(), bytes->size());
+                    drawList->AddCallback(&drawlist_callback_py_wrapper, tmp, required_size);
                 }
+            } else {
+                int64_t userdata_int = std::get<int64_t>(userdatav);
+                intptr_t userdata[2] = { (intptr_t)cb_ptr, userdata_int };
+                drawList->AddCallback(&drawlist_callback_py_wrapper, userdata, sizeof(userdata));
             }
-        }, "callable"_a, "userdata"_a);
+        }, "callback"_a, "userdata"_a = 0)
+        .def("add_reset_render_state_callback", [](ImDrawList* drawList) {
+            drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr, 0);
+        }, "Add a callback to reset the renderer backend's render state to default.\n"
+           "Equivalent to the C++ ImDrawCallback_ResetRenderState sentinel.");
 
     nb::class_<ImDrawData>(m, "DrawData")
         .def("scale_clip_rects", &ImDrawData::ScaleClipRects, "fb_scale"_a)
@@ -673,8 +973,6 @@ NB_MODULE(slimgui_ext, top) {
             }
             return nb::make_iterator(nb::type<ImDrawData>(), "iterator", drawData.Textures->begin(), drawData.Textures->end());
         }, nb::keep_alive<0, 1>());
-
-
      nb::class_<ImGuiPayload>(m, "Payload", "Data payload for Drag and Drop operations: `accept_drag_drop_payload()`, `get_drag_drop_payload()`")
         .def("is_data_type", &ImGuiPayload::IsDataType)
         .def("is_preview", &ImGuiPayload::IsPreview)
@@ -684,6 +982,7 @@ NB_MODULE(slimgui_ext, top) {
         });
 
 #include "imgui_enums.inl"
+#include "imgui_funcs.inl"
     // "Internal" object getters that receive a context pointer.  Such functions
     // don't exist in the public ImGui API, but we provide them so that we
     // can correctly model object ownership in Python.
@@ -764,8 +1063,6 @@ NB_MODULE(slimgui_ext, top) {
         delete backend_data;
         ImGui::DestroyContext(ctx);
     });
-    m.def("render", &ImGui::Render);
-    m.def("end_frame", &ImGui::EndFrame);
     m.def("get_draw_data", &ImGui::GetDrawData, nb::rv_policy::reference);
     m.def("get_main_viewport", &ImGui::GetMainViewport, nb::rv_policy::reference);
 
@@ -798,10 +1095,6 @@ NB_MODULE(slimgui_ext, top) {
     m.def("show_style_editor", []() {
         ImGui::ShowStyleEditor(nullptr); // TODO styleref
     });
-    m.def("show_style_selector", &ImGui::ShowStyleSelector, "label"_a);
-    m.def("show_font_selector", &ImGui::ShowFontSelector, "label"_a);
-    m.def("show_user_guide", &ImGui::ShowUserGuide);
-    m.def("get_version", &ImGui::GetVersion);
 
     // Styles
     m.def("style_colors_dark_internal", &ImGui::StyleColorsDark, "dst"_a);
@@ -814,25 +1107,15 @@ NB_MODULE(slimgui_ext, top) {
         bool visible = ImGui::Begin(name, closable ? &open : NULL, flags);
         return std::pair(visible, open);
     }, "name"_a, "closable"_a = false, "flags"_a.sig("WindowFlags.NONE") = ImGuiWindowFlags_None);
-    m.def("end", &ImGui::End);
-
-
     // IMGUI_API bool          BeginChild(ImGuiID id, const ImVec2& size = ImVec2(0, 0), ImGuiChildFlags child_flags = 0, ImGuiWindowFlags window_flags = 0);
     m.def("begin_child", [](const char* str_id, const ImVec2& size, ImGuiChildFlags_ child_flags, ImGuiWindowFlags_ window_flags) {
         return ImGui::BeginChild(str_id, size, child_flags, window_flags);
     }, "str_id"_a, "size"_a =  ImVec2(0, 0), "child_flags"_a.sig("ChildFlags.NONE") = ImGuiChildFlags_None, "window_flags"_a.sig("WindowFlags.NONE") = ImGuiWindowFlags_None);
-    m.def("end_child", &ImGui::EndChild);
 
     // Windows Utilities
-    m.def("is_window_appearing", &ImGui::IsWindowAppearing);
-    m.def("is_window_collapsed", &ImGui::IsWindowCollapsed);
     m.def("is_window_focused", [](ImGuiFocusedFlags_ flags) { return ImGui::IsWindowFocused(flags); }, "flags"_a.sig("FocusedFlags.NONE") = ImGuiFocusedFlags_None);
     m.def("is_window_hovered", [](ImGuiHoveredFlags_ flags) { return ImGui::IsWindowHovered(flags); }, "flags"_a.sig("HoveredFlags.NONE") = ImGuiHoveredFlags_None);
     // IMGUI_API ImDrawList*   GetWindowDrawList();                        // get draw list associated to the current window, to append your own drawing primitives
-    m.def("get_window_pos", &ImGui::GetWindowPos);
-    m.def("get_window_size", &ImGui::GetWindowSize);
-    m.def("get_window_width", &ImGui::GetWindowWidth);
-    m.def("get_window_height", &ImGui::GetWindowHeight);
 
     // Window manipulation
     // - Prefer using SetNextXXX functions (before Begin) rather that SetXXX functions (after Begin).
@@ -844,26 +1127,21 @@ NB_MODULE(slimgui_ext, top) {
     }, "size"_a, "cond"_a.sig("Cond.NONE") = ImGuiCond_None);
 
     // Note: the Python callback reference should be kept alive by the WrapperContext on the Python wrapper side.
-    m.def("set_next_window_size_constraints_internal", [](const ImVec2& size_min, const ImVec2& size_max, std::optional<nb::typed<nb::callable, ImVec2(ImVec2, ImVec2, ImVec2, uint64_t)>> cb, uint64_t int_user_data) {
+    m.def("set_next_window_size_constraints_internal", [](const ImVec2& size_min, const ImVec2& size_max, std::optional<nb::callable> cb) {
         ImGuiIO& io = ImGui::GetIO(ImGui::GetCurrentContext());
-        ContextBackendData* backend_data = (ContextBackendData*)io.BackendLanguageUserData;
+        ContextBackendData* bd = (ContextBackendData*)io.BackendLanguageUserData;
         if (cb) {
-            backend_data->size_constraints.callable_ptr = (void*)cb.value().ptr();
-            backend_data->size_constraints.int_user_data = int_user_data;
-            ImGui::SetNextWindowSizeConstraints(size_min, size_max, &window_size_constraints_callback_py_wrapper, backend_data);
+            bd->size_constraints_callback = nb::cast(cb.value());
+            ImGui::SetNextWindowSizeConstraints(size_min, size_max, &window_size_constraints_callback_py_wrapper, bd);
         } else {
-            backend_data->size_constraints.callable_ptr = nullptr;
+            bd->size_constraints_callback = nb::none();
             ImGui::SetNextWindowSizeConstraints(size_min, size_max, nullptr, nullptr);
         }
-    }, "size_min"_a, "size_max"_a, "cb"_a = nb::none(), "int_user_data"_a = 0);
+    }, "size_min"_a, "size_max"_a, "cb"_a = nb::none());
 
-    m.def("set_next_window_content_size", ImGui::SetNextWindowContentSize, "size"_a);
     m.def("set_next_window_collapsed", [](bool collapsed, ImGuiCond_ cond) {
         ImGui::SetNextWindowCollapsed(collapsed, cond);
     }, "collapsed"_a, "cond"_a.sig("Cond.NONE") = ImGuiCond_None);
-    m.def("set_next_window_focus", ImGui::SetNextWindowFocus);
-    m.def("set_next_window_scroll", ImGui::SetNextWindowScroll, "scroll"_a);
-    m.def("set_next_window_bg_alpha", ImGui::SetNextWindowBgAlpha, "alpha"_a);
     m.def("set_window_pos", [](const ImVec2& pos, ImGuiCond_ cond) { ImGui::SetWindowPos(pos, cond); }, "pos"_a, "cond"_a.sig("Cond.NONE") = ImGuiCond_None);
     m.def("set_window_size", [](const ImVec2& size, ImGuiCond_ cond) { ImGui::SetWindowSize(size, cond); }, "size"_a, "cond"_a.sig("Cond.NONE") = ImGuiCond_None);
     m.def("set_window_collapsed", [](bool collapsed, ImGuiCond_ cond) { ImGui::SetWindowCollapsed(collapsed, cond); }, "collapsed"_a, "cond"_a.sig("Cond.NONE") = ImGuiCond_None);
@@ -874,20 +1152,10 @@ NB_MODULE(slimgui_ext, top) {
     m.def("set_window_focus", [](const char* name) { ImGui::SetWindowFocus(name); }, "name"_a);
 
     // Content region
-    // - Retrieve available space from a given point. GetContentRegionAvail() is frequently useful.
-    m.def("get_content_region_avail", &ImGui::GetContentRegionAvail);
 
     // Windows Scrolling
-    // - Any change of Scroll will be applied at the beginning of next frame in the first call to Begin().
-    // - You may instead use SetNextWindowScroll() prior to calling Begin() to avoid this delay, as an alternative to using SetScrollX()/SetScrollY().
-    m.def("get_scroll_x", &ImGui::GetScrollX);
-    m.def("get_scroll_y", &ImGui::GetScrollY);
     m.def("set_scroll_x", [](float scroll_x) { ImGui::SetScrollX(scroll_x); }, "scroll_x"_a);
     m.def("set_scroll_y", [](float scroll_y) { ImGui::SetScrollY(scroll_y); }, "scroll_y"_a);
-    m.def("get_scroll_max_x", &ImGui::GetScrollMaxX);
-    m.def("get_scroll_max_y", &ImGui::GetScrollMaxY);
-    m.def("set_scroll_here_x", &ImGui::SetScrollHereX, "center_x_ratio"_a = 0.5f);
-    m.def("set_scroll_here_y", &ImGui::SetScrollHereY, "center_y_ratio"_a = 0.5f);
     m.def("set_scroll_from_pos_x", [](float local_x, float center_x_ratio) {
         ImGui::SetScrollFromPosX(local_x, center_x_ratio);
     }, "local_x"_a, "center_x_ratio"_a = 0.5f);
@@ -900,42 +1168,27 @@ NB_MODULE(slimgui_ext, top) {
         ImGui::PushFont(font, font_size_base);
     }, "font"_a.none(), "font_size_base"_a, "Use `None` as a shortcut to keep current font.  Use 0.0 for `font_size_base` to keep the current font size.");
 
-    m.def("pop_font", &ImGui::PopFont);
     m.def("push_style_color", [](ImGuiCol_ idx, ImU32 col) { ImGui::PushStyleColor(idx, col); }, "idx"_a, "col"_a);
     m.def("push_style_color", [](ImGuiCol_ idx, const ImVec4& col) { ImGui::PushStyleColor(idx, col); }, "idx"_a, "col"_a);
     m.def("push_style_color", [](ImGuiCol_ idx, const Vec3& col) {
         ImVec4 c(col.x, col.y, col.z, 1.0f);
         ImGui::PushStyleColor(idx, c);
     }, "idx"_a, "col"_a);
-    m.def("pop_style_color", &ImGui::PopStyleColor, "count"_a = 1);
     m.def("push_style_var", [](ImGuiStyleVar_ idx, float val) { ImGui::PushStyleVar(idx, val); }, "idx"_a, "val"_a);
     m.def("push_style_var", [](ImGuiStyleVar_ idx, const ImVec2& val) { ImGui::PushStyleVar(idx, val); }, "idx"_a, "val"_a);
     m.def("push_style_var_x", [](ImGuiStyleVar_ idx, float val_x) { ImGui::PushStyleVarX(idx, val_x); }, "idx"_a, "val_x"_a);
     m.def("push_style_var_y", [](ImGuiStyleVar_ idx, float val_y) { ImGui::PushStyleVarY(idx, val_y); }, "idx"_a, "val_y"_a);
-    m.def("pop_style_var", &ImGui::PopStyleVar, "count"_a = 1);
     m.def("push_item_flag", [](ImGuiItemFlags_ option, bool enabled) { ImGui::PushItemFlag(option, enabled); }, "option"_a, "enabled"_a);
-    m.def("pop_item_flag", &ImGui::PopItemFlag);
 
     // Parameters stacks (current window)
-    m.def("push_item_width", &ImGui::PushItemWidth, "item_width"_a);
-    m.def("pop_item_width", &ImGui::PopItemWidth);
-    m.def("set_next_item_width", &ImGui::SetNextItemWidth, "item_width"_a);
-    m.def("calc_item_width", &ImGui::CalcItemWidth);
-    m.def("push_text_wrap_pos", &ImGui::PushTextWrapPos, "wrap_local_pos_x"_a = 0.f);
-    m.def("pop_text_wrap_pos", &ImGui::PopTextWrapPos);
 
     // Style read access
     // IMGUI_API ImFont*       GetFont();                                                      // get current font
-    m.def("get_font_size", &ImGui::GetFontSize,
-        "Get current font size (= height in pixels) of current font, with global scale factors applied.\n"
-        "\n"
-        "- Use `style.font_size_base` to get value before global scale factors.\n"
-        "- recap: `imgui.get_font_size() == style.font_size_base * (style.font_scale_main * style.font_scale_dpi * other_scaling_factors)`");
 
-    m.def("get_font_tex_uv_white_pixel", &ImGui::GetFontTexUvWhitePixel);
     m.def("get_color_u32", [](ImGuiCol_ idx, float alpha_mul) { return ImGui::GetColorU32(idx, alpha_mul);}, "idx"_a, "alpha_mul"_a = 1.0f);
     m.def("get_color_u32", [](ImVec4 col)                     { return ImGui::GetColorU32(col);}, "col"_a);
     m.def("get_color_u32", [](ImU32 col, float alpha_mul)     { return ImGui::GetColorU32(col, alpha_mul);}, "col"_a, "alpha_mul"_a = 1.0f);
+    // get_style_color_vec4 (manual: uses "col" param name for API compat)
     m.def("get_style_color_vec4", [](ImGuiCol_ idx) { return ImGui::GetStyleColorVec4(idx);}, "col"_a);
 
     // ID stack/scopes
@@ -952,15 +1205,14 @@ NB_MODULE(slimgui_ext, top) {
     m.def("text_wrapped", [](const char* text) { ImGui::TextWrapped("%s", text); }, "text"_a);
     m.def("bullet_text", [](const char* text) { ImGui::BulletText("%s", text); }, "text"_a);
     m.def("label_text", [](const char* label, const char* text) { ImGui::LabelText(label, "%s", text); }, "label"_a, "text"_a);
+    // separator_text (manual: uses "text" param name for API compat)
     m.def("separator_text", &ImGui::SeparatorText, "text"_a);
 
     // Widgets: Main
-    m.def("button", &ImGui::Button, "label"_a, "size"_a = ImVec2());
-    m.def("small_button", &ImGui::SmallButton, "label"_a);
+    // invisible_button (manual: .sig() for flags)
     m.def("invisible_button", [](const char* str_id, const ImVec2 &size, ImGuiButtonFlags_ flags) {
         return ImGui::InvisibleButton(str_id, size, flags);
     }, "str_id"_a, "size"_a, "flags"_a.sig("ButtonFlags.NONE") = ImGuiButtonFlags_None);
-    m.def("arrow_button", &ImGui::ArrowButton, "str_id"_a, "dir"_a);
     m.def("checkbox", [](const char* label, bool v) {
         bool pressed = ImGui::Checkbox(label, &v);
         return std::tuple(pressed, v);
@@ -979,7 +1231,6 @@ NB_MODULE(slimgui_ext, top) {
     m.def("progress_bar", [](float fraction, ImVec2 size_arg, std::optional<std::string> overlay) {
         ImGui::ProgressBar(fraction, size_arg, overlay ? overlay.value().c_str() : nullptr);
     }, "fraction"_a, "size_arg"_a.sig("(-FLT_MIN, 0)") = ImVec2(-FLT_MIN, 0), "overlay"_a = nb::none());
-    m.def("bullet", &ImGui::Bullet);
     m.def("text_link", [](const char* label) { ImGui::TextLink(label); }, "label"_a);
     m.def("text_link_open_url", [](const char* label, std::optional<const char*> url) { ImGui::TextLinkOpenURL(label, url ? url.value() : nullptr); }, "label"_a, "url"_a = nb::none());
 
@@ -1003,40 +1254,32 @@ NB_MODULE(slimgui_ext, top) {
         bool changed = ImGui::Combo(label, &current_item, &items[0], items.size(), popup_max_height_in_items);
         return std::tuple(changed, current_item);
     }, "label"_a, "current_item"_a, "items"_a, "popup_max_height_in_items"_a = -1);
+    m.def("combo", [](const char* label, int current_item, nb::callable getter, int items_count, int popup_max_height_in_items) {
+        struct GetterData { nb::callable* fn; };
+        GetterData gd { &getter };
+        auto c_getter = [](void* user_data, int idx) -> const char* {
+            GetterData* gd = (GetterData*)user_data;
+            try {
+                nb::object result = (*gd->fn)(idx);
+                return nb::cast<const char*>(result);
+            } catch (nb::python_error& e) {
+                e.discard_as_unraisable("combo getter callback");
+                return "";
+            }
+        };
+        bool changed = ImGui::Combo(label, &current_item, c_getter, &gd, items_count, popup_max_height_in_items);
+        return std::tuple(changed, current_item);
+    }, "label"_a, "current_item"_a, "getter"_a, "items_count"_a, "popup_max_height_in_items"_a = -1);
 
-    m.def("get_cursor_screen_pos", &ImGui::GetCursorScreenPos);
-    m.def("set_cursor_screen_pos", &ImGui::SetCursorScreenPos, "pos"_a);
-    m.def("get_cursor_pos", &ImGui::GetCursorPos);
-    m.def("get_cursor_pos_x", &ImGui::GetCursorPosX);
-    m.def("get_cursor_pos_y", &ImGui::GetCursorPosY);
-    m.def("set_cursor_pos", &ImGui::SetCursorPos, "local_pos"_a);
-    m.def("set_cursor_pos_x", &ImGui::SetCursorPosX, "local_x"_a);
-    m.def("set_cursor_pos_y", &ImGui::SetCursorPosY, "local_y"_a);
-    m.def("get_cursor_start_pos", &ImGui::GetCursorStartPos);
+    // get_cursor_screen_pos, set_cursor_screen_pos, get_cursor_pos, get_cursor_pos_x, get_cursor_pos_y
+    // set_cursor_pos, set_cursor_pos_x, set_cursor_pos_y, get_cursor_start_pos
 
-    // Other layout functions
-    m.def("separator", &ImGui::Separator);
-    m.def("same_line", &ImGui::SameLine, "offset_from_start_x"_a = 0.0f, "spacing"_a = -1.0f);
-    m.def("new_line", &ImGui::NewLine);
-    m.def("spacing", &ImGui::Spacing);
-    m.def("dummy", &ImGui::Dummy, "size"_a);
-    m.def("indent", &ImGui::Indent, "indent_w"_a = 0.0f);
-    m.def("unindent", &ImGui::Unindent, "indent_w"_a = 0.0f);
-    m.def("begin_group", &ImGui::BeginGroup);
-    m.def("end_group", &ImGui::EndGroup);
-    m.def("align_text_to_frame_padding", &ImGui::AlignTextToFramePadding);
-    m.def("get_text_line_height", &ImGui::GetTextLineHeight);
-    m.def("get_text_line_height_with_spacing", &ImGui::GetTextLineHeightWithSpacing);
-    m.def("get_frame_height", &ImGui::GetFrameHeight);
-    m.def("get_frame_height_with_spacing", &ImGui::GetFrameHeightWithSpacing);
-
-    m.def("begin_menu_bar", &ImGui::BeginMenuBar);
-    m.def("end_menu_bar", &ImGui::EndMenuBar);
-    m.def("begin_main_menu_bar", &ImGui::BeginMainMenuBar);
-    m.def("end_main_menu_bar", &ImGui::EndMainMenuBar);
+    // separator, same_line, new_line, spacing, dummy, indent, unindent
+    // begin_group, end_group, align_text_to_frame_padding
+    // get_text_line_height, get_text_line_height_with_spacing
+    // get_frame_height, get_frame_height_with_spacing
 
     m.def("begin_menu", &ImGui::BeginMenu, "label"_a, "enabled"_a = true);
-    m.def("end_menu", &ImGui::EndMenu);
     m.def("menu_item", [](const char* label, std::optional<std::string> shortcut, bool selected, bool enabled) {
         bool mut_selected = selected;
         bool clicked = ImGui::MenuItem(label, shortcut ? shortcut.value().c_str() : nullptr, &mut_selected, enabled);
@@ -1044,18 +1287,7 @@ NB_MODULE(slimgui_ext, top) {
     }, "label"_a, "shortcut"_a = nb::none(), "selected"_a = false, "enabled"_a = true);
 
     // Tooltips
-
-    // // - Tooltips are windows following the mouse. They do not take focus away.
-    // // - A tooltip window can contain items of any types. SetTooltip() is a shortcut for the 'if (BeginTooltip()) { Text(...); EndTooltip(); }' idiom.
-    m.def("begin_tooltip", &ImGui::BeginTooltip);
-    m.def("end_tooltip", &ImGui::EndTooltip);
     m.def("set_tooltip", [](const char* text) { ImGui::SetTooltip("%s", text);}, "text"_a);
-
-    // // Tooltips: helpers for showing a tooltip when hovering an item
-    // // - BeginItemTooltip() is a shortcut for the 'if (IsItemHovered(ImGuiHoveredFlags_ForTooltip) && BeginTooltip())' idiom.
-    // // - SetItemTooltip() is a shortcut for the 'if (IsItemHovered(ImGuiHoveredFlags_ForTooltip)) { SetTooltip(...); }' idiom.
-    // // - Where 'ImGuiHoveredFlags_ForTooltip' itself is a shortcut to use 'style.HoverFlagsForTooltipMouse' or 'style.HoverFlagsForTooltipNav' depending on active input type. For mouse it defaults to 'ImGuiHoveredFlags_Stationary | ImGuiHoveredFlags_DelayShort'.
-    m.def("begin_item_tooltip", &ImGui::BeginItemTooltip);
     m.def("set_item_tooltip", [](const char* text) { ImGui::SetItemTooltip("%s", text);}, "text"_a);
 
     m.def("begin_popup", [](const char *str_id, ImGuiWindowFlags_ flags) {
@@ -1067,7 +1299,6 @@ NB_MODULE(slimgui_ext, top) {
         return std::pair(ret, open);
     }, "str_id"_a, "closable"_a = false, "flags"_a.sig("WindowFlags.NONE") = ImGuiWindowFlags_None,
     "Returns a tuple of bools.  If the first returned bool is `True`, the modal is open and you can start outputting to it.");
-    m.def("end_popup", &ImGui::EndPopup);
     m.def("open_popup", [](const char* str_id, ImGuiPopupFlags_ flags) {
         ImGui::OpenPopup(str_id, flags);
     }, "str_id"_a, "flags"_a.sig("PopupFlags.NONE") = ImGuiPopupFlags_None);
@@ -1075,7 +1306,6 @@ NB_MODULE(slimgui_ext, top) {
     m.def("open_popup_on_item_click", [](std::optional<std::string> str_id, ImGuiPopupFlags_ flags) {
         ImGui::OpenPopupOnItemClick(str_id ? str_id.value().c_str() : nullptr, flags);
     }, "str_id"_a = nb::none(), "flags"_a.sig("PopupFlags.MOUSE_BUTTON_RIGHT") = ImGuiPopupFlags_MouseButtonRight);
-    m.def("close_current_popup", &ImGui::CloseCurrentPopup);
 
     // // Popups: open+begin combined functions helpers
     // //  - Helpers to do OpenPopup+BeginPopup where the Open action is triggered by e.g. hovering an item and right-clicking.
@@ -1106,10 +1336,6 @@ NB_MODULE(slimgui_ext, top) {
     m.def("tree_node", [](const char* str_id, const char* text, ImGuiTreeNodeFlags_ flags) {
         return ImGui::TreeNodeEx(str_id, flags, "%s", text);
     }, "str_id"_a, "text"_a, "flags"_a.sig("TreeNodeFlags.NONE") = ImGuiTreeNodeFlags_None);
-    m.def("tree_push", [](const char* str_id) { return ImGui::TreePush(str_id); }, "str_id"_a);
-    // IMGUI_API void          TreePush(const void* ptr_id);                                       // "
-    m.def("tree_pop", ImGui::TreePop);
-    m.def("get_tree_node_to_label_spacing", ImGui::GetTreeNodeToLabelSpacing);
     m.def("set_next_item_open", [](bool is_open, ImGuiCond_ cond) {
         ImGui::SetNextItemOpen(is_open, cond);
     }, "is_open"_a, "cond"_a.sig("Cond.NONE") = ImGuiCond_None);
@@ -1145,18 +1371,65 @@ NB_MODULE(slimgui_ext, top) {
         bool changed = ImGui::ListBox(label, &current_item, &items[0], items.size(), height_in_items);
         return std::tuple(changed, current_item);
     }, "label"_a, "current_item"_a, "items"_a, "height_in_items"_a = -1);
+    m.def("list_box", [](const char* label, int current_item, nb::callable getter, int items_count, int height_in_items) {
+        struct GetterData { nb::callable* fn; };
+        GetterData gd { &getter };
+        auto c_getter = [](void* user_data, int idx) -> const char* {
+            GetterData* gd = (GetterData*)user_data;
+            try {
+                nb::object result = (*gd->fn)(idx);
+                return nb::cast<const char*>(result);
+            } catch (nb::python_error& e) {
+                e.discard_as_unraisable("list_box getter callback");
+                return "";
+            }
+        };
+        bool changed = ImGui::ListBox(label, &current_item, c_getter, &gd, items_count, height_in_items);
+        return std::tuple(changed, current_item);
+    }, "label"_a, "current_item"_a, "getter"_a, "items_count"_a, "height_in_items"_a = -1);
 
+    // Multi-Select API
+    m.def("begin_multi_select", [](ImGuiMultiSelectFlags_ flags, int selection_size, int items_count) {
+        return ImGui::BeginMultiSelect(flags, selection_size, items_count);
+    }, "flags"_a, "selection_size"_a = -1, "items_count"_a = -1, nb::rv_policy::reference);
+    m.def("end_multi_select", &ImGui::EndMultiSelect, nb::rv_policy::reference);
+    m.def("set_next_item_selection_user_data", &ImGui::SetNextItemSelectionUserData, "selection_user_data"_a);
+    m.def("is_item_toggled_selection", &ImGui::IsItemToggledSelection);
 
-    // Widgets: Data Plotting
-    // - Consider using ImPlot (https://github.com/epezent/implot) which is much better!
     m.def("plot_lines", [](const char* label, const nb::ndarray<const float, nb::ndim<1>, nb::device::cpu>& arr, std::optional<std::string> overlay_text, float scale_min, float scale_max, ImVec2 graph_size) {
         ImGui::PlotLines(label, arr.data(), arr.shape(0), 0, overlay_text ? overlay_text.value().c_str() : nullptr, scale_min, scale_max, graph_size);
     }, "label"_a, "values"_a, "overlay_text"_a = nb::none(), "scale_min"_a.sig("FLT_MAX") = FLT_MAX, "scale_max"_a.sig("FLT_MAX") = FLT_MAX, "graph_size"_a = ImVec2(0,0));
+    m.def("plot_lines", [](const char* label, nb::callable values_getter, int values_count, int values_offset, std::optional<std::string> overlay_text, float scale_min, float scale_max, ImVec2 graph_size) {
+        struct GetterData { nb::callable* fn; };
+        GetterData gd { &values_getter };
+        auto c_getter = [](void* user_data, int idx) -> float {
+            GetterData* gd = (GetterData*)user_data;
+            try {
+                return nb::cast<float>((*gd->fn)(idx));
+            } catch (nb::python_error& e) {
+                e.discard_as_unraisable("plot_lines values_getter callback");
+                return 0.0f;
+            }
+        };
+        ImGui::PlotLines(label, c_getter, &gd, values_count, values_offset, overlay_text ? overlay_text.value().c_str() : nullptr, scale_min, scale_max, graph_size);
+    }, "label"_a, "values_getter"_a, "values_count"_a, "values_offset"_a = 0, "overlay_text"_a = nb::none(), "scale_min"_a.sig("FLT_MAX") = FLT_MAX, "scale_max"_a.sig("FLT_MAX") = FLT_MAX, "graph_size"_a = ImVec2(0,0));
     m.def("plot_histogram", [](const char* label, const nb::ndarray<const float, nb::ndim<1>, nb::device::cpu>& arr, std::optional<std::string> overlay_text, float scale_min, float scale_max, ImVec2 graph_size) {
         ImGui::PlotHistogram(label, arr.data(), arr.shape(0), 0, overlay_text ? overlay_text.value().c_str() : nullptr, scale_min, scale_max, graph_size);
     }, "label"_a, "values"_a, "overlay_text"_a = nb::none(), "scale_min"_a.sig("FLT_MAX") = FLT_MAX, "scale_max"_a.sig("FLT_MAX") = FLT_MAX, "graph_size"_a = ImVec2(0,0));
-
-
+    m.def("plot_histogram", [](const char* label, nb::callable values_getter, int values_count, int values_offset, std::optional<std::string> overlay_text, float scale_min, float scale_max, ImVec2 graph_size) {
+        struct GetterData { nb::callable* fn; };
+        GetterData gd { &values_getter };
+        auto c_getter = [](void* user_data, int idx) -> float {
+            GetterData* gd = (GetterData*)user_data;
+            try {
+                return nb::cast<float>((*gd->fn)(idx));
+            } catch (nb::python_error& e) {
+                e.discard_as_unraisable("plot_histogram values_getter callback");
+                return 0.0f;
+            }
+        };
+        ImGui::PlotHistogram(label, c_getter, &gd, values_count, values_offset, overlay_text ? overlay_text.value().c_str() : nullptr, scale_min, scale_max, graph_size);
+    }, "label"_a, "values_getter"_a, "values_count"_a, "values_offset"_a = 0, "overlay_text"_a = nb::none(), "scale_min"_a.sig("FLT_MAX") = FLT_MAX, "scale_max"_a.sig("FLT_MAX") = FLT_MAX, "graph_size"_a = ImVec2(0,0));
     // // Widgets: Regular Sliders
     m.def("slider_float", [](const char* label, float v, float v_min, float v_max, const char* format, ImGuiSliderFlags_ flags) {
         bool changed = ImGui::SliderFloat(label, &v, v_min, v_max, format, flags);
@@ -1270,18 +1543,14 @@ NB_MODULE(slimgui_ext, top) {
     }, "label"_a, "v_current_min"_a, "v_current_max"_a, "v_speed"_a = 1.0f, "v_min"_a = 0, "v_max"_a = 0, "format"_a = "%d", "format_max"_a = nb::none(), "flags"_a.sig("SliderFlags.NONE") = ImGuiSliderFlags_None);
 
     // Widgets: Input with Keyboard
-    auto input_text_handler = [](const char* label, const char* hint, std::string text, ImGuiInputTextFlags flags, bool multiline, ImVec2 size = ImVec2(0, 0)) {
+    auto input_text_handler = [](const char* label, const char* hint, std::string text, ImGuiInputTextFlags flags, bool multiline, std::optional<nb::callable> py_callback, ImVec2 size = ImVec2(0, 0)) {
         IM_ASSERT((flags & ImGuiInputTextFlags_CallbackResize) == 0);
         flags |= ImGuiInputTextFlags_CallbackResize;
 
-        ImGuiInputTextCallback callback = nullptr;
-        void* user_data = nullptr;
-
         InputTextCallback_UserData cb_user_data;
         cb_user_data.Str = &text;
-        cb_user_data.ChainCallback = callback;
+        cb_user_data.ChainCallback = py_callback ? &py_callback.value() : nullptr;
 
-        cb_user_data.ChainCallbackUserData = user_data;
         bool changed;
         if (!multiline) {
             changed = hint == nullptr ?
@@ -1292,15 +1561,15 @@ NB_MODULE(slimgui_ext, top) {
         }
         return std::pair(changed, text);
     };
-    m.def("input_text", [&](const char* label, std::string text, ImGuiInputTextFlags_ flags) {
-        return input_text_handler(label, nullptr, text, flags, false);
-    }, "label"_a, "text"_a, "flags"_a.sig("InputTextFlags.NONE") = ImGuiInputTextFlags_None);
-    m.def("input_text_with_hint", [&](const char* label, const char* hint, std::string text, ImGuiInputTextFlags_ flags) {
-        return input_text_handler(label, hint, text, flags, false);
-    }, "label"_a, "hint"_a, "text"_a, "flags"_a.sig("InputTextFlags.NONE") = ImGuiInputTextFlags_None);
-    m.def("input_text_multiline", [&](const char* label, std::string text, ImVec2 size, ImGuiInputTextFlags_ flags) {
-        return input_text_handler(label, nullptr, text, flags, true, size);
-    }, "label"_a, "text"_a, "size"_a = ImVec2(0, 0), "flags"_a.sig("InputTextFlags.NONE") = ImGuiInputTextFlags_None);
+    m.def("input_text", [&](const char* label, std::string text, ImGuiInputTextFlags_ flags, std::optional<nb::callable> callback) {
+        return input_text_handler(label, nullptr, text, flags, false, callback);
+    }, "label"_a, "text"_a, "flags"_a.sig("InputTextFlags.NONE") = ImGuiInputTextFlags_None, "callback"_a = nb::none());
+    m.def("input_text_with_hint", [&](const char* label, const char* hint, std::string text, ImGuiInputTextFlags_ flags, std::optional<nb::callable> callback) {
+        return input_text_handler(label, hint, text, flags, false, callback);
+    }, "label"_a, "hint"_a, "text"_a, "flags"_a.sig("InputTextFlags.NONE") = ImGuiInputTextFlags_None, "callback"_a = nb::none());
+    m.def("input_text_multiline", [&](const char* label, std::string text, ImVec2 size, ImGuiInputTextFlags_ flags, std::optional<nb::callable> callback) {
+        return input_text_handler(label, nullptr, text, flags, true, callback, size);
+    }, "label"_a, "text"_a, "size"_a = ImVec2(0, 0), "flags"_a.sig("InputTextFlags.NONE") = ImGuiInputTextFlags_None, "callback"_a = nb::none());
 
     m.def("input_int", [](const char* label, int v, int step, int step_fast, ImGuiInputTextFlags_ flags) {
         bool changed = ImGui::InputInt(label, &v, step, step_fast, flags);
@@ -1381,30 +1650,20 @@ NB_MODULE(slimgui_ext, top) {
     m.def("begin_table", [](const char *str_id, int column, ImGuiTableFlags_ flags, const ImVec2 &outer_size, float inner_width) {
         return ImGui::BeginTable(str_id, column, flags, outer_size, inner_width);
     }, "str_id"_a, "column"_a, "flags"_a.sig("TableFlags.NONE") = ImGuiTableFlags_None, "outer_size"_a = ImVec2(0.f, 0.f), "inner_width"_a = 0.0f);
-    m.def("end_table", &ImGui::EndTable);
+    // table_next_row (manual: .sig() for flags)
     m.def("table_next_row", [](ImGuiTableRowFlags_ row_flags, float min_row_height) {
         ImGui::TableNextRow(row_flags, min_row_height);
     }, "flags"_a.sig("TableRowFlags.NONE") = ImGuiTableRowFlags_None, "min_row_height"_a = 0.0f);
-    m.def("table_next_column", &ImGui::TableNextColumn);
-    m.def("table_set_column_index", &ImGui::TableSetColumnIndex, "column_n"_a);
 
     // Tables: Headers & Columns declaration
     m.def("table_setup_column", [](const char *label, ImGuiTableColumnFlags_ flags, float init_width_or_weight, ImGuiID user_id) {
         ImGui::TableSetupColumn(label, flags, init_width_or_weight, user_id);
     }, "label"_a, "flags"_a.sig("TableColumnFlags.NONE") = ImGuiTableColumnFlags_None, "init_width_or_weight"_a = 0.f, "user_id"_a = 0);
-    m.def("table_setup_scroll_freeze", &ImGui::TableSetupScrollFreeze, "cols"_a, "rows"_a);
-    m.def("table_header", &ImGui::TableHeader, "label"_a);
-    m.def("table_headers_row", &ImGui::TableHeadersRow);
     m.def("table_angled_headers_row", &ImGui::TableAngledHeadersRow);
 
     // Tables: Sorting & Miscellaneous functions
-    // IMGUI_API ImGuiTableSortSpecs*  TableGetSortSpecs();                        // get latest sort specs for the table (NULL if not sorting).  Lifetime: don't hold on this pointer over multiple frames or past any subsequent call to BeginTable().
-    m.def("table_get_column_count", &ImGui::TableGetColumnCount);
-    m.def("table_get_column_index", &ImGui::TableGetColumnIndex);
-    m.def("table_get_row_index", &ImGui::TableGetRowIndex);
     m.def("table_get_column_name", [](int column_n) { return nb::str(ImGui::TableGetColumnName(column_n)); }, "column_n"_a = -1);
     m.def("table_get_column_flags", [](int column_n) { return (ImGuiTableColumnFlags_)ImGui::TableGetColumnFlags(column_n); }, "column_n"_a = -1);
-    m.def("table_set_column_enabled", &ImGui::TableSetColumnEnabled, "column_n"_a, "v"_a);
     m.def("table_get_hovered_column", &ImGui::TableGetHoveredColumn);
     m.def("table_set_bg_color", [](ImGuiTableBgTarget_ target, const ImVec4& col, int column_n) {
         ImGui::TableSetBgColor(target, ImGui::ColorConvertFloat4ToU32(col), column_n);
@@ -1427,14 +1686,12 @@ NB_MODULE(slimgui_ext, top) {
     m.def("begin_tab_bar", [](const char* str_id, ImGuiTabBarFlags_ flags) {
         return ImGui::BeginTabBar(str_id, flags);
     }, "str_id"_a, "flags"_a.sig("TabBarFlags.NONE") = ImGuiTabBarFlags_None);
-    m.def("end_tab_bar", &ImGui::EndTabBar);
 
     m.def("begin_tab_item", [](const char* label, bool closable, ImGuiTabItemFlags_ flags) {
         bool open = true;
         bool selected = ImGui::BeginTabItem(label, closable ? &open : NULL, flags);
         return std::pair(selected, open);
     }, "str_id"_a, "closable"_a = false, "flags"_a.sig("TabItemFlags.NONE") = ImGuiTabItemFlags_None);
-    m.def("end_tab_item", &ImGui::EndTabItem);
 
     m.def("tab_item_button", [](const char* label, ImGuiTabItemFlags_ flags) {
         return ImGui::TabItemButton(label, flags);
@@ -1455,13 +1712,9 @@ NB_MODULE(slimgui_ext, top) {
     m.def("set_drag_drop_payload", [](const char* type, nb::bytes data, ImGuiCond_ cond) {
         return ImGui::SetDragDropPayload(type, data.data(), data.size(), cond);
     }, "type"_a, "data"_a, "cond"_a.sig("Cond.NONE") = ImGuiCond_None);
-    m.def("end_drag_drop_source", &ImGui::EndDragDropSource);
-    m.def("begin_drag_drop_target", &ImGui::BeginDragDropTarget);
-    m.def("end_drag_drop_target", &ImGui::EndDragDropTarget);
 
     // Disabling [BETA API]
     m.def("begin_disabled", &ImGui::BeginDisabled, "disabled"_a = true);
-    m.def("end_disabled", &ImGui::EndDisabled);
 
     // Clipping
     // - Mouse hovering is affected by ImGui::PushClipRect() calls, unlike direct calls to ImDrawList::PushClipRect() which are render only.
@@ -1469,37 +1722,19 @@ NB_MODULE(slimgui_ext, top) {
     m.def("pop_clip_rect", &ImGui::PopClipRect);
 
     // // Focus, Activation
-    m.def("set_item_default_focus", &ImGui::SetItemDefaultFocus);
-    m.def("set_keyboard_focus_here", &ImGui::SetKeyboardFocusHere, "offset"_a = 0);
 
     // Keyboard/Gamepad Navigation
     m.def("set_nav_cursor_visible", &ImGui::SetNavCursorVisible, "visible"_a);
 
     // Overlapping mode
-    m.def("set_next_item_allow_overlap", &ImGui::SetNextItemAllowOverlap);
 
     // Item/Widgets Utilities and Query Functions
     m.def("is_item_hovered", [](ImGuiHoveredFlags_ flags) {
         return ImGui::IsItemHovered(flags);
     }, "flags"_a.sig("HoveredFlags.NONE") = ImGuiHoveredFlags_None);
-    m.def("is_item_active", &ImGui::IsItemActive);
-    m.def("is_item_focused", &ImGui::IsItemFocused);
     m.def("is_item_clicked", [](ImGuiMouseButton_ mouse_button) {
         return ImGui::IsItemClicked(mouse_button);
     }, "mouse_button"_a.sig("MouseButton.LEFT") = ImGuiMouseButton_Left);
-    m.def("is_item_visible", &ImGui::IsItemVisible);
-    m.def("is_item_edited", &ImGui::IsItemEdited);
-    m.def("is_item_activated", &ImGui::IsItemActivated);
-    m.def("is_item_deactivated", &ImGui::IsItemDeactivated);
-    m.def("is_item_deactivated_after_edit", &ImGui::IsItemDeactivatedAfterEdit);
-    m.def("is_item_toggled_open", &ImGui::IsItemToggledOpen);
-    m.def("is_any_item_hovered", &ImGui::IsAnyItemHovered);
-    m.def("is_any_item_active", &ImGui::IsAnyItemActive);
-    m.def("is_any_item_focused", &ImGui::IsAnyItemFocused);
-    m.def("get_item_id", &ImGui::GetItemID, "Get ID of last item (often roughly the same as `get_id(label)` beforehand)");
-    m.def("get_item_rect_min", &ImGui::GetItemRectMin);
-    m.def("get_item_rect_max", &ImGui::GetItemRectMax);
-    m.def("get_item_rect_size", &ImGui::GetItemRectSize);
 
     // Miscellaneous Utilities
     m.def("is_rect_visible", [](const ImVec2& size) {
@@ -1508,8 +1743,6 @@ NB_MODULE(slimgui_ext, top) {
     m.def("is_rect_visible", [](const ImVec2& rect_min, const ImVec2& rect_max) {
         return ImGui::IsRectVisible(rect_min, rect_max);
     }, "rect_min"_a, "rect_max"_a);
-    m.def("get_time", &ImGui::GetTime);
-    m.def("get_frame_count", &ImGui::GetFrameCount);
     // IMGUI_API ImDrawListSharedData* GetDrawListSharedData();                                    // you may use this when creating your own ImDrawList instances.
     m.def("get_style_color_name", [](ImGuiCol_ idx) { return ImGui::GetStyleColorName(idx); }, "col"_a);
     // IMGUI_API void          SetStateStorage(ImGuiStorage* storage);                             // replace current window storage with our own (if you want to manipulate it yourself, typically clear subsection of it)
@@ -1565,7 +1798,6 @@ NB_MODULE(slimgui_ext, top) {
     m.def("is_mouse_double_clicked", [](ImGuiMouseButton_ button) { return ImGui::IsMouseDoubleClicked(button); }, "button"_a);
     m.def("is_mouse_released_with_delay", [](ImGuiMouseButton_ button, float delay) { return ImGui::IsMouseReleasedWithDelay(button, delay); }, "button"_a, "delay"_a);
     m.def("get_mouse_clicked_count", [](ImGuiMouseButton_ button) { return ImGui::GetMouseClickedCount(button); }, "button"_a);
-    m.def("is_mouse_hovering_rect", [](const ImVec2& r_min, const ImVec2& r_max, bool clip) { return ImGui::IsMouseHoveringRect(r_min, r_max, clip); }, "r_min"_a, "r_max"_a, "clip"_a = true);
     m.def("is_mouse_pos_valid", [](std::optional<ImVec2> mouse_pos) {
         if (mouse_pos) {
             ImVec2 v = mouse_pos.value();
@@ -1573,8 +1805,6 @@ NB_MODULE(slimgui_ext, top) {
         }
         return ImGui::IsMousePosValid(NULL);
     }, "mouse_pos"_a.none() = std::nullopt);
-    m.def("get_mouse_pos", &ImGui::GetMousePos);
-    m.def("get_mouse_pos_on_opening_current_popup", &ImGui::GetMousePosOnOpeningCurrentPopup);
     m.def("is_mouse_dragging", [](ImGuiMouseButton_ button, float lock_threshold) {
         return ImGui::IsMouseDragging(button, lock_threshold);
     }, "button"_a, "lock_threshold"_a = -1.0f);
@@ -1586,16 +1816,25 @@ NB_MODULE(slimgui_ext, top) {
     }, "button"_a.sig("MouseButton.LEFT") = ImGuiMouseButton_Left);
     m.def("get_mouse_cursor", []() { return (ImGuiMouseCursor_)ImGui::GetMouseCursor(); });
     m.def("set_mouse_cursor", [](ImGuiMouseCursor_ cursor_type) { ImGui::SetMouseCursor(cursor_type); }, "cursor_type"_a);
+    // set_next_frame_want_capture_mouse (manual: uses "capture" param name for API compat)
     m.def("set_next_frame_want_capture_mouse", &ImGui::SetNextFrameWantCaptureMouse, "capture"_a);
 
-    m.def("get_clipboard_text", &ImGui::GetClipboardText);
-    m.def("set_clipboard_text", &ImGui::SetClipboardText, "text"_a);
+    // Value() helpers
+    m.def("value", [](const char* prefix, bool b) { ImGui::Value(prefix, b); }, "prefix"_a, "b"_a);
+    m.def("value", [](const char* prefix, int v) { ImGui::Value(prefix, v); }, "prefix"_a, "v"_a);
+    m.def("value", [](const char* prefix, float v, std::optional<const char*> float_format) {
+        ImGui::Value(prefix, v, float_format ? float_format.value() : nullptr);
+    }, "prefix"_a, "v"_a, "float_format"_a = nb::none());
+
+    // Settings/.Ini Utilities
+    m.def("load_ini_settings_from_memory", [](const char* ini_data) {
+        ImGui::LoadIniSettingsFromMemory(ini_data, 0);
+    }, "ini_data"_a);
+    m.def("save_ini_settings_to_memory", []() {
+        return std::string(ImGui::SaveIniSettingsToMemory());
+    });
 
     // Disable Nanobind leak warnings by default.
     nb::set_leak_warnings(false);
     m.def("set_nanobind_leak_warnings", &nb::set_leak_warnings, "enable"_a);
-
-    // Implot
-    nb::module_ implot = top.def_submodule("implot", "ImPlot bindings");
-    implot_bindings(implot);
 }

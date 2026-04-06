@@ -64,18 +64,11 @@ class DrawList:
     def _clear_callback_refs(self):
         self._callback_refs.clear()
 
-    def add_callback(self, callable: int | Callable[[imgui_ext.DrawList, imgui_ext.DrawCmd, int | bytes], None], userdata: int | bytes) -> None:
+    def add_callback(self, callback: Callable[[imgui_ext.DrawList, imgui_ext.DrawCmd, int | bytes], None], userdata: int | bytes = 0) -> None:
         """
         May be used to alter render state (change sampler, blending, current shader). May be used to emit custom rendering commands (difficult to do correctly, but possible).
 
-        Use the special render state reset callback with `dl.add_callback(DRAW_CALLBACK_RESET_RENDER_STATE, 0)` to instruct backend to reset its render state to the default.
-
         Your backend renderer must call `DrawCmd.run_callback()` and handle the result appropriately.  All standard backends honor this.
-
-        Special `DRAW_CALLBACK_RESET_RENDER_STATE` value can be passsed as the callable argument to request renderer backend to reset the graphics/render state.
-        The renderer backend needs to handle this special value, otherwise it will crash trying to call a function at this address.
-        This is useful, for example, if you submitted callbacks which you know have altered the render state and you want it to be restored.
-        Render state is not reset by default because they are many perfectly useful way of altering render state (e.g. changing shader/blending settings before an Image call).
 
         Immutable userdata can be passed as either an `int` or a `bytes` object.  This data will be passed down to the callback when it's invoked in the backend renderer.
 
@@ -89,10 +82,18 @@ class DrawList:
         to do some identity checks, then you'd have to do it like `parent_dl is other_dl._dl`, not `parent_dl is other_dl`.
         """
 
-        self._dl.add_callback(callable, userdata)
+        self._dl.add_callback(callback, userdata)
         # Keep track of callbacks so that they're not deallocated before the next `imgui.new_frame()`.
-        if not isinstance(callable, int):
-            self._callback_refs.append(callable)
+        self._callback_refs.append(callback)
+
+    def add_reset_render_state_callback(self) -> None:
+        """
+        Add a callback to reset the renderer backend's render state to default.
+
+        This is useful, for example, if you submitted callbacks which you know have altered the render state and you want it to be restored.
+        Render state is not reset by default because there are many perfectly useful ways of altering render state (e.g. changing shader/blending settings before an Image call).
+        """
+        self._dl.add_reset_render_state_callback()
 
     def push_clip_rect(self, clip_rect_min: tuple[float, float], clip_rect_max: tuple[float, float], intersect_with_current_clip_rect: bool = False) -> None:
         """
@@ -436,27 +437,48 @@ def get_drag_drop_payload() -> imgui_ext.Payload | None:
     assert ctx is not None
     return ctx.context.get_drag_drop_payload_internal()
 
-def set_next_window_size_constraints(size_min: tuple[float, float], size_max: tuple[float, float], cb: Callable[[tuple[float, float], tuple[float, float], tuple[float, float], int], tuple[float, float]] | None = None, user_data_id: int = 0) -> None:
+def set_next_window_size_constraints(size_min: tuple[float, float], size_max: tuple[float, float], callback: Callable[[imgui_ext.SizeCallbackData], None] | None = None) -> None:
     """
     Set next window size limits.  Use 0.0 or FLT_MAX if you don't want limits.  Use -1 for both min and max of same axis to preserve current size (which itself is a constraint).  Use callback to apply non-trivial programmatic constraints.
 
-    This function still has some rough corners.  It only accepts an integer `user_data` argument.  If you need to pass a float through it, you could for example convert to fixed point and convert back to float in the constraint function.  Or you can capture any such values as a function closure.
+    The callback receives a `SizeCallbackData` object.  Modify `data.desired_size` to apply your constraint.
 
-    Use of constrain callbacks:
+    Use of constraint callbacks:
     ```
-    def aspect_ratio_constraint_16_9(_pos:  FVec2, _current_size: FVec2, desired_size: FVec2, _int_user_data: int) -> FVec2:
-        aspect_ratio = 16.0 / 9
-        new_desired_y = int(desired_size[0] / aspect_ratio)
-        return (desired_size[0], new_desired_y)
+    def keep_square(data: imgui.SizeCallbackData):
+        max_side = max(data.desired_size[0], data.desired_size[1])
+        data.desired_size = (max_side, max_side)
 
     # usage:
-
-    imgui.set_next_window_size_constraints((0, 0), (FLT_MAX, FLT_MAX), aspect_ratio_constraint_16_9)
+    imgui.set_next_window_size_constraints((0, 0), (FLT_MAX, FLT_MAX), keep_square)
     ```
     """
     ctx = get_current_context()
     assert ctx is not None
-    ctx._window_size_constraints_cb = cb
-    imgui_ext.set_next_window_size_constraints_internal(size_min, size_max, cb, user_data_id)
+    ctx._window_size_constraints_cb = callback
+    imgui_ext.set_next_window_size_constraints_internal(size_min, size_max, callback)
+
+#------------------------------------------------------------------------
+# Python property wrappers for nullable callback attributes.
+# nanobind's def_prop_rw doesn't accept None in setters, so we use
+# _get/_set methods in C++ and wrap them as properties here.
+
+def _make_nullable_callback_property(getter_name: str, setter_name: str):
+    """Create a property that delegates to _get/_set methods on the native object."""
+    def fget(self):
+        return getattr(self, getter_name)()
+    def fset(self, value):
+        getattr(self, setter_name)(value)
+    return property(fget, fset)
+
+# PlatformIO callback properties
+imgui_ext.PlatformIO.platform_get_clipboard_text_fn = _make_nullable_callback_property('_get_platform_get_clipboard_text_fn', '_set_platform_get_clipboard_text_fn')
+imgui_ext.PlatformIO.platform_set_clipboard_text_fn = _make_nullable_callback_property('_get_platform_set_clipboard_text_fn', '_set_platform_set_clipboard_text_fn')
+imgui_ext.PlatformIO.platform_open_in_shell_fn = _make_nullable_callback_property('_get_platform_open_in_shell_fn', '_set_platform_open_in_shell_fn')
+imgui_ext.PlatformIO.platform_set_ime_data_fn = _make_nullable_callback_property('_get_platform_set_ime_data_fn', '_set_platform_set_ime_data_fn')
+
+# SelectionBasicStorage / SelectionExternalStorage adapter properties
+imgui_ext.SelectionBasicStorage.adapter_index_to_storage_id = _make_nullable_callback_property('get_adapter_index_to_storage_id', 'set_adapter_index_to_storage_id')
+imgui_ext.SelectionExternalStorage.adapter_set_item_selected = _make_nullable_callback_property('get_adapter_set_item_selected', 'set_adapter_set_item_selected')
 
 #------------------------------------------------------------------------
