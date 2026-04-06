@@ -1067,6 +1067,7 @@ NB_MODULE(slimgui_ext, top) {
     m.def("get_main_viewport", &ImGui::GetMainViewport, nb::rv_policy::reference);
 
     // Demo, Debug, Information
+#ifndef IMGUI_DISABLE_DEMO_WINDOWS
     m.def("show_demo_window", [](bool closable) {
         bool open = true;
         ImGui::ShowDemoWindow(closable ? &open : nullptr);
@@ -1095,6 +1096,13 @@ NB_MODULE(slimgui_ext, top) {
     m.def("show_style_editor", []() {
         ImGui::ShowStyleEditor(nullptr); // TODO styleref
     });
+    m.def("show_style_selector", &ImGui::ShowStyleSelector, "label"_a,
+        "Add style selector block (not a window), essentially a combo listing the default styles.");
+    m.def("show_font_selector", &ImGui::ShowFontSelector, "label"_a,
+        "Add font selector block (not a window), essentially a combo listing the loaded fonts.");
+    m.def("show_user_guide", &ImGui::ShowUserGuide,
+        "Add basic help/info block (not a window): how to manipulate ImGui as an end-user (mouse/keyboard controls).");
+#endif
 
     // Styles
     m.def("style_colors_dark_internal", &ImGui::StyleColorsDark, "dst"_a);

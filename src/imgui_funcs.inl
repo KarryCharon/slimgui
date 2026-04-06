@@ -11,19 +11,6 @@
     m.def("render",
         ImGui::Render, "ends the Dear ImGui frame, finalize the draw data. You can then get call GetDrawData().");
 
-    m.def("show_style_selector",
-        ImGui::ShowStyleSelector,
-        nb::arg("label"),
-        "add style selector block (not a window), essentially a combo listing the default styles.");
-
-    m.def("show_font_selector",
-        ImGui::ShowFontSelector,
-        nb::arg("label"),
-        "add font selector block (not a window), essentially a combo listing the loaded fonts.");
-
-    m.def("show_user_guide",
-        ImGui::ShowUserGuide, "add basic help/info block (not a window): how to manipulate ImGui as an end-user (mouse/keyboard controls).");
-
     m.def("get_version",
         ImGui::GetVersion, "get the compiled version string e.g. \"1.80 WIP\" (essentially the value for IMGUI_VERSION from the compiled version of imgui.cpp)");
 

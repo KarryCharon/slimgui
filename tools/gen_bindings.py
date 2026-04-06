@@ -283,6 +283,7 @@ MANUAL_FUNC_PATTERNS = [
     r"^ShowDemoWindow$", r"^ShowMetricsWindow$", r"^ShowDebugLogWindow$",
     r"^ShowIDStackToolWindow$", r"^ShowAboutWindow$",
     r"^ShowStyleEditor$",  # takes ImGuiStyle* ref
+    r"^ShowStyleSelector$", r"^ShowFontSelector$", r"^ShowUserGuide$",  # in imgui_demo.cpp
     # Style functions (take ImGuiStyle* dst)
     r"^StyleColorsDark$", r"^StyleColorsLight$", r"^StyleColorsClassic$",
     # Windows (bool* p_open -> tuple)
@@ -404,7 +405,7 @@ MANUAL_FUNC_PATTERNS = [
 # These are simple forwarding functions with no complex logic.
 LITGEN_FUNC_ALLOWLIST = [
     # Demo/Debug simple
-    "ShowStyleSelector", "ShowFontSelector", "ShowUserGuide", "GetVersion",
+    "GetVersion",
     # Main simple
     "Render", "EndFrame",
     # Windows
