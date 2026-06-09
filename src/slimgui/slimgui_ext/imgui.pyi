@@ -1404,6 +1404,52 @@ class Payload:
 
     def data(self) -> bytes: ...
 
+class ListClipper:
+    """
+    Helper to clip large lists of uniformly-sized items.
+
+    Manually call Begin()/End() or use as a context manager.
+    Call Step() in a while-loop; use display_start/display_end to know which items to draw.
+    """
+
+    def __init__(self) -> None: ...
+
+    def begin(self, items_count: int, items_height: float = -1.0) -> None:
+        """Begin the clipper. items_height=-1 means auto-detect from first item."""
+
+    def end(self) -> None:
+        """
+        End the clipper. Automatically called by the last Step() returning false.
+        """
+
+    def step(self) -> bool:
+        """
+        Call in a while-loop. Returns false when done. Use display_start/display_end to determine which items to draw.
+        """
+
+    def include_item_by_index(self, item_index: int) -> None:
+        """Ensure a specific item is never clipped (call before first Step())."""
+
+    def include_items_by_index(self, item_begin: int, item_end: int) -> None:
+        """Ensure a range of items is never clipped. item_end is exclusive."""
+
+    def seek_cursor_for_item(self, item_index: int) -> None:
+        """
+        Seek cursor toward given item. Useful with Begin(INT_MAX) when count is unknown.
+        """
+
+    @property
+    def display_start(self) -> int:
+        """First item to display (inclusive), updated by Step()."""
+
+    @property
+    def display_end(self) -> int:
+        """End of items to display (exclusive), updated by Step()."""
+
+    def __enter__(self) -> ListClipper: ...
+
+    def __exit__(self, arg0: object, arg1: object, arg2: object, /) -> None: ...
+
 class WindowFlags(enum.IntFlag):
     __str__ = __repr__
 
@@ -3740,21 +3786,6 @@ def render() -> None:
     ends the Dear ImGui frame, finalize the draw data. You can then get call GetDrawData().
     """
 
-def show_style_selector(label: str) -> bool:
-    """
-    add style selector block (not a window), essentially a combo listing the default styles.
-    """
-
-def show_font_selector(label: str) -> None:
-    """
-    add font selector block (not a window), essentially a combo listing the loaded fonts.
-    """
-
-def show_user_guide() -> None:
-    """
-    add basic help/info block (not a window): how to manipulate ImGui as an end-user (mouse/keyboard controls).
-    """
-
 def get_version() -> str:
     """
     get the compiled version string e.g. "1.80 WIP" (essentially the value for IMGUI_VERSION from the compiled version of imgui.cpp)
@@ -4296,35 +4327,23 @@ def get_main_viewport() -> Viewport:
     ...
 
 
-def show_demo_window(closable: bool = False) -> bool:
-    """Create Demo window. demonstrate most ImGui features. call this to learn about the library! try to make it always available in your application!"""
-    ...
+def error_recovery_store_state() -> int:
+    """
+    Save current imgui stack sizes for later recovery. Returns an opaque handle.
+    """
 
+def error_recovery_try_to_recover_state(state_handle: int, free_handle: bool = True) -> None:
+    """
+    Recover imgui state to a previously saved snapshot. Automatically calls missing End/Pop functions. Optionally frees the handle.
+    """
 
-def show_metrics_window(closable: bool = False) -> bool:
-    """Create Metrics/Debugger window. display Dear ImGui internals: windows, draw commands, various internal state, etc."""
-    ...
+def error_recovery_free_state(state_handle: int) -> None:
+    """Free a previously saved state handle without recovering."""
 
-
-def show_debug_log_window(closable: bool = False) -> bool:
-    """Create Debug Log window. display a simplified log of important dear imgui events."""
-    ...
-
-
-def show_id_stack_tool_window(closable: bool = False) -> bool:
-    """Create Stack Tool window. hover items with mouse to query information about the source of their unique ID."""
-    ...
-
-
-def show_about_window(closable: bool = False) -> bool:
-    """Create About window. display Dear ImGui version, credits and build/system information."""
-    ...
-
-
-def show_style_editor() -> None:
-    """Add style editor block (not a window). you can pass in a reference ImGuiStyle structure to compare to, revert to and save to (else it uses the default style)"""
-    ...
-
+def error_recovery_try_to_recover_window_state(state_handle: int, free_handle: bool = False) -> None:
+    """
+    Recover window-level state only (style, font, id stacks etc). Optionally frees the handle.
+    """
 
 def style_colors_dark_internal(dst: Style) -> None:
     ...

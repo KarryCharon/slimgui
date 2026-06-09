@@ -4136,6 +4136,17 @@ def set_keyboard_focus_here(offset: int = 0) -> None:
     focus keyboard on the next widget. Use positive 'offset' to access sub components of a multiple component widget. Use -1 to access previous widget.
     """
 
+def clear_active_id() -> None:
+    """
+    Clear the active item id (e.g. unfocus InputText so overlapping widgets can capture mouse). Uses Dear ImGui internal API.
+    """
+
+def consume_io_mouse_clicked(button: MouseButton) -> None:
+    """
+    Clear io.MouseClicked[button] for the current frame so widgets submitted afterward (e.g. InputText) do not treat it as a new click.
+    MouseDown stays true; pair with clear_active_id() when stealing mouse drags from an overlapping InputText.
+    """
+
 def set_next_item_allow_overlap() -> None:
     """
     allow next item to be overlapped by a subsequent item. Useful with invisible buttons, selectable, treenode covering an area where subsequent items may need to be added. Note that both Selectable() and TreeNode() have dedicated flags doing this.

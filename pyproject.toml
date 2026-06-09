@@ -34,6 +34,7 @@ dev = [
     "markdown>=3.10",
     "toml>=0.10",
     "requests>=2.31",
+    "build>=1.4.4"
 ]
 
 [tool.scikit-build]
@@ -49,7 +50,13 @@ wheel.py-api = "cp312"
 # Editable install: redirect imports to build dir
 editable.mode = "redirect"
 
-# cmake.build-type = "Debug"
+# 单配置生成器 (NMake / Ninja) 用 cmake.build-type 即可生效;
+# 多配置生成器 (Visual Studio) 在 configure 阶段 CMAKE_BUILD_TYPE 不起作用,
+# 必须在 build 阶段传 --config Release. cmake.define 在 configure 时把变量
+# 强制写入 cache, scikit-build-core build 阶段会据此选择 --config 参数,
+# 同时也覆盖 CMakeLists.txt 里通过 `if(NOT CMAKE_BUILD_TYPE)` 兜底的逻辑.
+[tool.scikit-build.cmake.define]
+CMAKE_BUILD_TYPE = "Release"
 
 [tool.cibuildwheel]
 # Necessary to see build output from the actual compilation

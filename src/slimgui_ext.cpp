@@ -102,12 +102,12 @@ static int InputTextCallback(ImGuiInputTextCallbackData* data)
 }
 
 struct ContextBackendData {
-    nb::object size_constraints_callback;
+    nb::object size_constraints_callback = nb::none();
     // PlatformIO hook callable pointers (prevent GC via WrappedContext Python side)
-    nb::object platform_get_clipboard_text_fn;
-    nb::object platform_set_clipboard_text_fn;
-    nb::object platform_open_in_shell_fn;
-    nb::object platform_set_ime_data_fn;
+    nb::object platform_get_clipboard_text_fn = nb::none();
+    nb::object platform_set_clipboard_text_fn = nb::none();
+    nb::object platform_open_in_shell_fn = nb::none();
+    nb::object platform_set_ime_data_fn = nb::none();
     // Stored clipboard text returned by get_clipboard callback (must outlive the returned const char*)
     std::string clipboard_text_buf;
     // Selection adapter callable refs (prevent GC, keyed by Selection* pointer)
@@ -161,10 +161,17 @@ static bool platform_open_in_shell_py_wrapper(ImGuiContext* ctx, const char* pat
 static void platform_set_ime_data_py_wrapper(ImGuiContext* ctx, ImGuiViewport* viewport, ImGuiPlatformImeData* data) {
     ImGuiIO& io = ImGui::GetIO(ctx);
     ContextBackendData* bd = static_cast<ContextBackendData*>(io.BackendLanguageUserData);
+    if (!bd || !bd->platform_set_ime_data_fn.ptr() || bd->platform_set_ime_data_fn.is_none()) {
+        ImGui::GetPlatformIO(ctx).Platform_SetImeDataFn = nullptr;
+        return;
+    }
     try {
         nb::borrow<nb::callable>(bd->platform_set_ime_data_fn)(viewport, data);
     } catch (nb::python_error& e) {
         e.discard_as_unraisable("platform_set_ime_data_fn callback");
+    } catch (nb::cast_error& e) {
+        nb::chain_error(PyExc_RuntimeError, "platform_set_ime_data_fn callback cast error");
+        nb::raise_python_error();
     }
 }
 static void drawlist_callback_py_wrapper(const ImDrawList* parent_list, const ImDrawCmd* cmd) {
@@ -981,6 +988,38 @@ NB_MODULE(slimgui_ext, top) {
             return nb::bytes(self.Data, self.DataSize);
         });
 
+    // ── ListClipper ──────────────────────────────────────────────────
+    nb::class_<ImGuiListClipper>(m, "ListClipper",
+        "Helper to clip large lists of uniformly-sized items.\n\n"
+        "Manually call Begin()/End() or use as a context manager.\n"
+        "Call Step() in a while-loop; use display_start/display_end to know which items to draw.")
+        .def(nb::init<>())
+        .def("begin", &ImGuiListClipper::Begin,
+            "items_count"_a, "items_height"_a = -1.0f,
+            "Begin the clipper. items_height=-1 means auto-detect from first item.")
+        .def("end", &ImGuiListClipper::End,
+            "End the clipper. Automatically called by the last Step() returning false.")
+        .def("step", &ImGuiListClipper::Step,
+            "Call in a while-loop. Returns false when done. "
+            "Use display_start/display_end to determine which items to draw.")
+        .def("include_item_by_index", &ImGuiListClipper::IncludeItemByIndex,
+            "item_index"_a,
+            "Ensure a specific item is never clipped (call before first Step()).")
+        .def("include_items_by_index", &ImGuiListClipper::IncludeItemsByIndex,
+            "item_begin"_a, "item_end"_a,
+            "Ensure a range of items is never clipped. item_end is exclusive.")
+        .def("seek_cursor_for_item", &ImGuiListClipper::SeekCursorForItem,
+            "item_index"_a,
+            "Seek cursor toward given item. Useful with Begin(INT_MAX) when count is unknown.")
+        .def_ro("display_start", &ImGuiListClipper::DisplayStart,
+            "First item to display (inclusive), updated by Step().")
+        .def_ro("display_end", &ImGuiListClipper::DisplayEnd,
+            "End of items to display (exclusive), updated by Step().")
+        .def("__enter__", [](ImGuiListClipper* self) { return self; }, nb::rv_policy::reference)
+        .def("__exit__", [](ImGuiListClipper* self, nb::handle, nb::handle, nb::handle) {
+            self->End();
+        });
+
 #include "imgui_enums.inl"
 #include "imgui_funcs.inl"
     // "Internal" object getters that receive a context pointer.  Such functions
@@ -1065,6 +1104,30 @@ NB_MODULE(slimgui_ext, top) {
     });
     m.def("get_draw_data", &ImGui::GetDrawData, nb::rv_policy::reference);
     m.def("get_main_viewport", &ImGui::GetMainViewport, nb::rv_policy::reference);
+
+    // Error recovery: save/restore imgui stack state
+    m.def("error_recovery_store_state", []() {
+        ImGuiErrorRecoveryState* state = new ImGuiErrorRecoveryState();
+        ImGui::ErrorRecoveryStoreState(state);
+        return (uintptr_t)state;
+    }, "Save current imgui stack sizes for later recovery. Returns an opaque handle.");
+    m.def("error_recovery_try_to_recover_state", [](uintptr_t state_handle, bool free_handle) {
+        ImGuiErrorRecoveryState* state = (ImGuiErrorRecoveryState*)state_handle;
+        ImGui::ErrorRecoveryTryToRecoverState(state);
+        if (free_handle)
+            delete state;
+    }, "state_handle"_a, "free_handle"_a = true,
+    "Recover imgui state to a previously saved snapshot. Automatically calls missing End/Pop functions. Optionally frees the handle.");
+    m.def("error_recovery_free_state", [](uintptr_t state_handle) {
+        delete (ImGuiErrorRecoveryState*)state_handle;
+    }, "state_handle"_a, "Free a previously saved state handle without recovering.");
+    m.def("error_recovery_try_to_recover_window_state", [](uintptr_t state_handle, bool free_handle) {
+        ImGuiErrorRecoveryState* state = (ImGuiErrorRecoveryState*)state_handle;
+        ImGui::ErrorRecoveryTryToRecoverWindowState(state);
+        if (free_handle)
+            delete state;
+    }, "state_handle"_a, "free_handle"_a = false,
+    "Recover window-level state only (style, font, id stacks etc). Optionally frees the handle.");
 
     // Demo, Debug, Information
 #ifndef IMGUI_DISABLE_DEMO_WINDOWS
