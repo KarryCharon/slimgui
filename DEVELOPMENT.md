@@ -5,7 +5,7 @@
 ```
 python3 -m venv .venv
 . .venv/bin/activate
-pip install nanobind==2.9.2 scikit-build-core litgen glfw pyopengl numpy toml markdown
+pip install nanobind==2.12.0 scikit-build-core litgen glfw pyopengl numpy toml markdown
 pip install -e . --no-build-isolation
 ```
 
