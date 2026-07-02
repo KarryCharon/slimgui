@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fragfx"
+version = "0.1.0"
+description = "渲染器无关的 fragment 特效组合框架：表达式 DAG → 运行时 shader，按树形状缓存编译产物"
+readme = "README.md"
+requires-python = ">=3.10"
+# 纯 stdlib，零运行时依赖
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fragfx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

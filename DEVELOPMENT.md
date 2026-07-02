@@ -3,11 +3,21 @@
 ## Setup
 
 ```
-python3 -m venv .venv
-. .venv/bin/activate
-pip install nanobind==2.12.0 scikit-build-core litgen glfw pyopengl numpy toml markdown
-pip install -e . --no-build-isolation
+uv sync --no-editable
 ```
+
+依赖全部在 pyproject 的 dev 组里（含 pip / nanobind / scikit-build-core，
+供 gen_bindings.py 的非隔离构建使用）。
+
+> **必须 `--no-editable`**：editable(redirect) 模式下 stubs 目录
+> `slimgui/slimgui_ext/*.pyi` 会在 scikit-build-core 的模块映射中覆盖
+> 同名的 `slimgui_ext.abi3.so`，导致 native 扩展 import 失败。
+
+## 仓库布局
+
+- `src/slimgui/` + `src/*.cpp` — slimgui 本体（Python 包 + C++ 绑定）
+- `packages/fragfx/` — 独立的 fragfx 特效库（uv workspace 子包，
+  纯 Python 零依赖，slimgui 本体不依赖它，仅 examples/tests 使用）
 
 ## Build
 
