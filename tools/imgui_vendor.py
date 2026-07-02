@@ -30,8 +30,12 @@ def vendor_in(src_url, outdir, subdir: str | None = None):
         if subdir is not None:
             src_dir = os.path.join(src_dir, subdir)
 
+        # 只保留编译/绑定所需内容：docs、examples、backends（Python 侧
+        # 集成是手写的，用不到 C++ backends）不进仓库
+        PRUNE_DIRS = {".github", "docs", "examples", "backends"}
+
         def ignore_github_dirs(dir, names):
-            return [name for name in names if name == ".github"]
+            return [name for name in names if name in PRUNE_DIRS]
 
         shutil.rmtree(outdir)
         shutil.copytree(src_dir, outdir, ignore=ignore_github_dirs, dirs_exist_ok=True)
@@ -39,4 +43,4 @@ def vendor_in(src_url, outdir, subdir: str | None = None):
 if __name__ == "__main__":
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     imgui_src = "https://github.com/ocornut/imgui/archive/refs/tags/v1.92.4.zip"
-    vendor_in(imgui_src, os.path.join(ROOT, 'src/c/imgui'))
+    vendor_in(imgui_src, os.path.join(ROOT, 'vendor/imgui'))

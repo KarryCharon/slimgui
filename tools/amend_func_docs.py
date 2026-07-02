@@ -218,7 +218,7 @@ def parse_func_line_comments(header_path: str) -> Dict[str, Union[str, None]]:
 
 def main():
     parser = argparse.ArgumentParser(description="Extract doc comments from imgui.h")
-    parser.add_argument('--imgui-h', type=str, default='src/c/imgui/imgui.h')
+    parser.add_argument('--imgui-h', type=str, default='vendor/imgui/imgui.h')
     parser.add_argument('--pyi-file', type=str, default='src/slimgui/slimgui_ext.pyi')
     parser.add_argument('-o', dest='output', type=str,
                         help="If not specified, output to stdout.")

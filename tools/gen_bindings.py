@@ -10,7 +10,7 @@ Complex bindings (callbacks, out-params, custom types) remain hand-written in
 slimgui_ext.cpp.
 
 Usage:
-    python tools/gen_bindings.py [--imgui-h src/c/imgui/imgui.h]
+    python tools/gen_bindings.py [--imgui-h vendor/imgui/imgui.h]
 """
 
 import re
@@ -21,7 +21,7 @@ from pathlib import Path
 import litgen
 
 ROOT = Path(__file__).resolve().parent.parent
-IMGUI_H = ROOT / "src" / "c" / "imgui" / "imgui.h"
+IMGUI_H = ROOT / "vendor" / "imgui" / "imgui.h"
 OUT_ENUMS_INL = ROOT / "src" / "imgui_enums.inl"
 OUT_FUNCS_INL = ROOT / "src" / "imgui_funcs.inl"
 

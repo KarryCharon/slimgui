@@ -23,14 +23,14 @@ find_package(nanobind CONFIG REQUIRED)
 add_definitions(-DIMGUI_DISABLE_OBSOLETE_KEYIO=1)
 
 set(IMGUI_SOURCES
-  src/c/imgui/imgui.cpp
-  src/c/imgui/imgui_draw.cpp
-  src/c/imgui/imgui_tables.cpp
-  src/c/imgui/imgui_widgets.cpp
+  vendor/imgui/imgui.cpp
+  vendor/imgui/imgui_draw.cpp
+  vendor/imgui/imgui_tables.cpp
+  vendor/imgui/imgui_widgets.cpp
 )
 
 if(SLIMGUI_INCLUDE_DEMO)
-  list(APPEND IMGUI_SOURCES src/c/imgui/imgui_demo.cpp)
+  list(APPEND IMGUI_SOURCES vendor/imgui/imgui_demo.cpp)
 else()
   add_definitions(-DIMGUI_DISABLE_DEMO_WINDOWS=1)
 endif()
@@ -43,7 +43,7 @@ nanobind_add_module(slimgui_ext
 
   src/anim_bindings.cpp
   src/slimgui_ext.cpp
-  src/cpp/ImAnim/im_anim.cpp
+  vendor/imanim/im_anim.cpp
   ${IMGUI_SOURCES}
 )
 
@@ -60,8 +60,8 @@ nanobind_add_module(slimgui_ext
 #         "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/imgui.pyi"
 # )
 
-include_directories(${CMAKE_SOURCE_DIR}/src/c/imgui)
-include_directories(${CMAKE_SOURCE_DIR}/src/cpp/ImAnim)
+include_directories(${CMAKE_SOURCE_DIR}/vendor/imgui)
+include_directories(${CMAKE_SOURCE_DIR}/vendor/imanim)
 
 if(APPLE)
   # Used by the default implementation for macOS clipboard access.

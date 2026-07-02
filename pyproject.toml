@@ -48,6 +48,23 @@ dev = [
     "nanobind==2.12.0",
 ]
 
+# uv 默认只根据 pyproject.toml 判断是否需要重建本包；
+# 本包是 C++ 扩展，改了源码/CMake 也必须触发重建
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "CMakeLists.txt" },
+    { file = "src/**/*.cpp" },
+    { file = "src/**/*.h" },
+    { file = "src/**/*.inl" },
+    { file = "src/slimgui/**/*.py" },
+    { file = "src/slimgui/**/*.pyi" },
+    { file = "vendor/imgui/*.cpp" },
+    { file = "vendor/imgui/*.h" },
+    { file = "vendor/imanim/im_anim.cpp" },
+    { file = "vendor/imanim/im_anim.h" },
+]
+
 [tool.uv.workspace]
 members = ["packages/fragfx"]
 
