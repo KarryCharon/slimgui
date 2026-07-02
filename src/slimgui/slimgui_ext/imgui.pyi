@@ -1,3 +1,5 @@
+"""Dear ImGui bindings"""
+
 from collections.abc import Callable, Iterator, Sequence
 import enum
 from typing import Annotated, overload, Any
@@ -4455,10 +4457,8 @@ def get_main_viewport() -> Viewport:
 
 def set_initial_fringe_scale(scale: float) -> None:
     """
-    Set the anti-aliasing fringe scale (default 1.0) applied to draw lists reset after this call within the current frame. Call right after `new_frame()` and before any window/draw submission. When the draw output is upscaled by a model matrix of factor S, pass `1.0/S` so the AA fringe and line/border edges stay ~1 physical pixel wide instead of being stretched (blurry). Note: any value != 1.0 disables the baked-texture AA line path, so AA lines use the polygon path.
+    Set the anti-aliasing fringe scale (default 1.0) applied to draw lists reset after this call within the current frame. Call right after new_frame() and before any window/draw submission. When the draw output is upscaled by a model matrix of factor S, pass 1.0/S so the AA fringe and line/border edges stay ~1 physical pixel wide instead of being stretched (blurry). Note: any value != 1.0 disables the baked-texture AA line path, so AA lines use the polygon path.
     """
-    ...
-
 
 def error_recovery_store_state() -> int:
     """
