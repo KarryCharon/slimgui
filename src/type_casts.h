@@ -1,6 +1,6 @@
 
 #pragma once
-
+#include <variant>
 template <typename Enum, typename Int = int>
 int variant_to_int(const std::variant<Enum, Int>& var) {
     if (auto p = std::get_if<Enum>(&var)) {

@@ -1220,6 +1220,25 @@ class DrawCmd:
     @property
     def elem_count(self) -> int: ...
 
+    @property
+    def has_callback(self) -> bool: ...
+
+    @property
+    def is_reset_render_state_callback(self) -> bool: ...
+
+    @property
+    def callback_userdata(self) -> object:
+        """
+        Userdata passed to `DrawList.add_callback` (int, bytes or an arbitrary object), or None if this command has no Python callback.
+        """
+
+    @property
+    def callback(self) -> object:
+        """
+        The Python callable passed to `DrawList.add_callback`, or None if this command has no Python callback.
+        Together with `callback_userdata` this lets a renderer inspect callback commands without running them.
+        """
+
     def run_callback(self, arg: DrawList, /) -> DrawListCallbackResult:
         """
         Run the callback added with `DrawList.add_callback` or do nothing if this draw command doesn't have a callback.
@@ -1245,7 +1264,26 @@ class DrawList:
         """
         Pack vertex/index/command data into numpy arrays in one C++ call.
         Returns: (positions[N,2], uvs[N,2], colors[N,4](u8),
-                  [(tex_id, (x1,y1,x2,y2), indices[M](i32)), ...])
+                  [(tex_id, (x1,y1,x2,y2), indices[M](i32), callback, userdata), ...])
+
+        For regular draw commands `callback` and `userdata` are None. For commands
+        added with `DrawList.add_callback` they carry the Python callable and its
+        userdata (the consumer decides whether to invoke the callable or dispatch on
+        the userdata). A reset-render-state token has
+        `callback == DrawListCallbackResult.RESET_RENDER_STATE`.
+        """
+
+    def get_render_data_merged(self) -> tuple:
+        """
+        Like `get_render_data` but returns ONE merged index array for the whole draw
+        list plus per-command (idx_offset, elem_count) ranges, instead of pre-sliced
+        per-command index arrays. Lets a renderer build a single index buffer + batch
+        and draw each command with a ranged draw call.
+        Returns: (positions[N,2], uvs[N,2], colors[N,4](u8), indices[I](i32),
+                  [(tex_id, (x1,y1,x2,y2), idx_offset, elem_count, callback, userdata), ...])
+
+        Indices already have per-command vtx_offset folded in (global into the vertex
+        arrays). `callback`/`userdata` semantics match `get_render_data`.
         """
 
     @property
@@ -1278,6 +1316,8 @@ class DrawList:
     def add_rect_filled(self, p_min: tuple[float, float], p_max: tuple[float, float], col: int, rounding: float = 0.0, flags: DrawFlags = DrawFlags.NONE) -> None: ...
 
     def add_rect_filled_multi_color(self, p_min: tuple[float, float], p_max: tuple[float, float], col_upr_left: int, col_upr_right: int, col_bot_right: int, col_bot_left: int) -> None: ...
+
+    def add_rect_filled_multi_color_rounded(self, p_min: tuple[float, float], p_max: tuple[float, float], col_upr_left: int, col_upr_right: int, col_bot_right: int, col_bot_left: int, rounding: float = 0.0, flags: DrawFlags = DrawFlags.NONE) -> None: ...
 
     def add_quad(self, p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float], p4: tuple[float, float], col: int, thickness: float = 1.0) -> None: ...
 
@@ -1368,7 +1408,7 @@ class DrawList:
 
     def channels_set_current(self, n: int) -> None: ...
 
-    def add_callback(self, callback: Callable[[DrawList, DrawCmd, int | bytes], None], userdata: int | bytes = 0) -> None: ...
+    def add_callback(self, callback: Callable[[DrawList, DrawCmd, object], None], userdata: object | None = None) -> None: ...
 
     def add_reset_render_state_callback(self) -> None:
         """
@@ -4283,6 +4323,92 @@ def debug_start_item_picker() -> None:
     ...
 
 
+def clear_active_id() -> None:
+    """
+    Clear the active item id (e.g. unfocus InputText so overlapping widgets can capture mouse). Uses Dear ImGui internal API.
+    """
+
+def temp_input_is_active(id: int | None = None) -> bool:
+    """
+    Return true when an item's temporary scalar/text input is active. If id is None, checks the last submitted item.
+    """
+
+def is_item_active_as_input_text() -> bool:
+    """
+    Return true when the last submitted item is currently active as an InputText field. Uses Dear ImGui internal API.
+    """
+
+def get_active_id() -> int:
+    """
+    Return the currently active item id, or 0 if none. Uses Dear ImGui internal API.
+    """
+
+def get_hovered_id() -> int:
+    """
+    Return the currently hovered item id, or 0 if none. Uses Dear ImGui internal API.
+    """
+
+def get_focus_id() -> int:
+    """
+    Return the current navigation/focus item id, or 0 if none. Uses Dear ImGui internal API.
+    """
+
+def get_temp_input_id() -> int:
+    """
+    Return the current temporary input id, or 0 if none. Uses Dear ImGui internal state.
+    """
+
+def get_last_active_id() -> int:
+    """
+    Return the last non-zero active item id. Uses Dear ImGui internal state.
+    """
+
+def get_last_active_id_timer() -> float:
+    """
+    Return seconds since the last active item became active. Uses Dear ImGui internal state.
+    """
+
+def get_item_flags() -> int:
+    """
+    Return flags for the last submitted item. Uses Dear ImGui internal API.
+    """
+
+def get_item_status_flags() -> int:
+    """
+    Return status flags for the last submitted item as an integer bitmask. Uses Dear ImGui internal API.
+    """
+
+def keep_alive_id(id: int) -> None:
+    """
+    Mark an item id as alive for the current frame. Useful for custom widgets using ButtonBehavior-like state. Uses Dear ImGui internal API.
+    """
+
+def focus_item() -> None:
+    """
+    Focus the last submitted item without activating it. Uses Dear ImGui internal API.
+    """
+
+def activate_item_by_id(id: int) -> None:
+    """
+    Queue activation for an item id on the next frame when that item is submitted. Uses Dear ImGui internal API.
+    """
+
+def set_active_id_using_all_keyboard_keys() -> None:
+    """
+    Declare that the current active item wants to own all keyboard keys. Uses Dear ImGui internal API.
+    """
+
+def is_active_id_using_nav_dir(dir: Dir) -> bool:
+    """
+    Return true when the active item is using the given navigation direction. Uses Dear ImGui internal API.
+    """
+
+def consume_io_mouse_clicked(button: MouseButton) -> None:
+    """
+    Clear io.MouseClicked[button] for the current frame so widgets submitted afterward (e.g. InputText) do not treat it as a new click.
+    MouseDown stays true; pair with clear_active_id() when stealing mouse drags from an overlapping InputText.
+    """
+
 class Context:
     def get_io_internal(self) -> IO: ...
 
@@ -4327,6 +4453,13 @@ def get_main_viewport() -> Viewport:
     ...
 
 
+def set_initial_fringe_scale(scale: float) -> None:
+    """
+    Set the anti-aliasing fringe scale (default 1.0) applied to draw lists reset after this call within the current frame. Call right after `new_frame()` and before any window/draw submission. When the draw output is upscaled by a model matrix of factor S, pass `1.0/S` so the AA fringe and line/border edges stay ~1 physical pixel wide instead of being stretched (blurry). Note: any value != 1.0 disables the baked-texture AA line path, so AA lines use the polygon path.
+    """
+    ...
+
+
 def error_recovery_store_state() -> int:
     """
     Save current imgui stack sizes for later recovery. Returns an opaque handle.
@@ -4343,6 +4476,51 @@ def error_recovery_free_state(state_handle: int) -> None:
 def error_recovery_try_to_recover_window_state(state_handle: int, free_handle: bool = False) -> None:
     """
     Recover window-level state only (style, font, id stacks etc). Optionally frees the handle.
+    """
+
+def show_demo_window(closable: bool = False) -> bool:
+    """Create Demo window. demonstrate most ImGui features. call this to learn about the library! try to make it always available in your application!"""
+    ...
+
+
+def show_metrics_window(closable: bool = False) -> bool:
+    """Create Metrics/Debugger window. display Dear ImGui internals: windows, draw commands, various internal state, etc."""
+    ...
+
+
+def show_debug_log_window(closable: bool = False) -> bool:
+    """Create Debug Log window. display a simplified log of important dear imgui events."""
+    ...
+
+
+def show_id_stack_tool_window(closable: bool = False) -> bool:
+    """Create Stack Tool window. hover items with mouse to query information about the source of their unique ID."""
+    ...
+
+
+def show_about_window(closable: bool = False) -> bool:
+    """Create About window. display Dear ImGui version, credits and build/system information."""
+    ...
+
+
+def show_style_editor() -> None:
+    """Add style editor block (not a window). you can pass in a reference ImGuiStyle structure to compare to, revert to and save to (else it uses the default style)"""
+    ...
+
+
+def show_style_selector(label: str) -> bool:
+    """
+    Add style selector block (not a window), essentially a combo listing the default styles.
+    """
+
+def show_font_selector(label: str) -> None:
+    """
+    Add font selector block (not a window), essentially a combo listing the loaded fonts.
+    """
+
+def show_user_guide() -> None:
+    """
+    Add basic help/info block (not a window): how to manipulate ImGui as an end-user (mouse/keyboard controls).
     """
 
 def style_colors_dark_internal(dst: Style) -> None:

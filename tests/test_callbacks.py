@@ -65,7 +65,7 @@ def test_drawlist_add_callback_basic(frame_scope):
 
 
 def test_drawlist_add_callback_default_userdata(frame_scope):
-    """userdata defaults to 0 when omitted."""
+    """userdata defaults to None when omitted."""
     received = []
     def cb(dl, cmd, userdata):
         received.append(userdata)
@@ -79,7 +79,7 @@ def test_drawlist_add_callback_default_userdata(frame_scope):
             c.run_callback(lst)
 
     imgui.new_frame()
-    assert received == [0]
+    assert received == [None]
 
 
 def test_drawlist_add_reset_render_state(frame_scope):
@@ -146,6 +146,123 @@ def test_drawlist_callback_gc_safety(frame_scope):
 
     imgui.new_frame()
     assert results == [99]
+
+
+def test_drawlist_add_callback_object_userdata(frame_scope):
+    """Arbitrary Python object userdata round-trips by identity."""
+    class Payload:
+        def __init__(self, tag):
+            self.tag = tag
+
+    payloads = [Payload("a"), {"k": [1, 2, 3]}, (1.5, 2.5), None]
+    received = []
+    def cb(dl, cmd, userdata):
+        received.append(userdata)
+
+    dl = imgui.get_foreground_draw_list()
+    for payload in payloads:
+        dl.add_callback(cb, payload)
+
+    imgui.render()
+    for lst in imgui.get_draw_data().commands_lists:
+        for c in lst.commands:
+            c.run_callback(lst)
+
+    imgui.new_frame()
+    assert len(received) == len(payloads)
+    for got, expected in zip(received, payloads):
+        assert got is expected, f"userdata identity lost: {got!r} is not {expected!r}"
+
+
+def test_drawlist_cmd_callback_inspection(frame_scope):
+    """`DrawCmd.callback` / `DrawCmd.callback_userdata` expose the command
+    payload without running the callback (renderer-side dispatch)."""
+    class Payload:
+        pass
+
+    payload = Payload()
+    def cb(dl, cmd, userdata):
+        raise AssertionError("must not be invoked by inspection")
+
+    dl = imgui.get_foreground_draw_list()
+    dl.add_callback(cb, payload)
+    dl.add_callback(cb, 42)
+    dl.add_callback(cb, b"raw")
+
+    imgui.render()
+    seen = []
+    for lst in imgui.get_draw_data().commands_lists:
+        for c in lst.commands:
+            if c.has_callback:
+                seen.append((c.callback, c.callback_userdata))
+            else:
+                assert c.callback is None
+                assert c.callback_userdata is None
+
+    imgui.new_frame()
+    assert len(seen) == 3
+    assert all(got_cb is cb for got_cb, _ in seen)
+    assert seen[0][1] is payload
+    assert seen[1][1] == 42
+    assert seen[2][1] == b"raw"
+
+
+def test_drawlist_get_render_data_keeps_callbacks(frame_scope):
+    """get_render_data() must not silently drop callback commands."""
+    payload = {"effect": "glow"}
+    def cb(dl, cmd, userdata):
+        pass
+
+    dl = imgui.get_foreground_draw_list()
+    dl.add_rect_filled((10, 10), (50, 50), 0xFFFFFFFF)
+    dl.add_callback(cb, payload)
+    dl.add_reset_render_state_callback()
+    dl.add_rect_filled((60, 10), (90, 50), 0xFF0000FF)
+
+    imgui.render()
+    rows = []
+    for lst in imgui.get_draw_data().commands_lists:
+        _pos, _uv, _col, cmds = lst.get_render_data()
+        for tex_id, clip, indices, callback, userdata in cmds:
+            rows.append((len(indices), callback, userdata))
+
+    imgui.new_frame()
+
+    draw_rows = [r for r in rows if r[0] > 0]
+    cb_rows = [r for r in rows if r[1] is cb]
+    reset_rows = [r for r in rows if r[1] == imgui.DrawListCallbackResult.RESET_RENDER_STATE]
+    assert len(draw_rows) >= 2, "regular draw commands missing"
+    assert all(r[1] is None and r[2] is None for r in draw_rows)
+    assert len(cb_rows) == 1, "python callback command was dropped"
+    assert cb_rows[0][2] is payload
+    assert len(reset_rows) == 1, "reset-render-state token was dropped"
+
+
+def test_drawlist_object_userdata_refcount(frame_scope):
+    """Object userdata is kept alive until new_frame, then released."""
+    class Payload:
+        pass
+
+    payload = Payload()
+    def cb(dl, cmd, userdata):
+        pass
+
+    dl = imgui.get_foreground_draw_list()
+    gc.collect()
+    base = sys.getrefcount(payload)
+
+    dl.add_callback(cb, payload)
+    gc.collect()
+    assert sys.getrefcount(payload) == base + 1
+
+    imgui.render()
+    for lst in imgui.get_draw_data().commands_lists:
+        for c in lst.commands:
+            c.run_callback(lst)
+
+    imgui.new_frame()
+    gc.collect()
+    assert sys.getrefcount(payload) == base
 
 
 # ---------------------------------------------------------------------------

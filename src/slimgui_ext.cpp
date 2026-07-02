@@ -19,9 +19,11 @@
 namespace nb = nanobind;
 using namespace nb::literals;
 
+void register_anim_bindings(nb::module_& top);
+
 #include "type_casts.h"
 
-using DrawListCallbackCallable = nb::typed<nb::callable, void(ImDrawList*, ImDrawCmd*, std::variant<int64_t, nb::bytes>)>;
+using DrawListCallbackCallable = nb::typed<nb::callable, void(ImDrawList*, ImDrawCmd*, nb::object)>;
 
 template<typename T, typename... Args>
 auto tuple_to_array(const std::tuple<Args...>& tpl) {
@@ -174,28 +176,42 @@ static void platform_set_ime_data_py_wrapper(ImGuiContext* ctx, ImGuiViewport* v
         nb::raise_python_error();
     }
 }
-static void drawlist_callback_py_wrapper(const ImDrawList* parent_list, const ImDrawCmd* cmd) {
-    auto callable_ptr = static_cast<PyObject*>(((void**)cmd->UserCallbackData)[0]);
-    try {
-        // callable ptr is used to mark userdata data variant (raw int or Python bytes)
-        bool has_bytes = ((intptr_t)callable_ptr & 1) != 0;
-        // remove tag bits and call
-        callable_ptr = (PyObject*)((uintptr_t)callable_ptr & ~1);
+static void drawlist_callback_py_wrapper(const ImDrawList* parent_list, const ImDrawCmd* cmd);
 
-        if (!has_bytes) {
-            const intptr_t* data = (const intptr_t*)cmd->UserCallbackData + 1;
-            nb::borrow<nb::callable>(callable_ptr)(parent_list, cmd, *data);
-        } else {
-            // Source userdata format:
-            //
-            // int64 [0]:   callable ptr (with | 1 tag bit)
-            // int64 [1..]: bytes
-            //
-            // The length of the byte string is stored in cmd->UserCallbackDataSize minus the callable ptr sizeof.
-            const intptr_t* data = (const intptr_t*)cmd->UserCallbackData + 1;
-            auto bytes = nb::bytes((const void*)data, (size_t)cmd->UserCallbackDataSize - sizeof(intptr_t));
-            nb::borrow<nb::callable>(callable_ptr)(parent_list, cmd, bytes);
-        }
+// Decode a Python callback stored by `DrawList.add_callback`.
+//
+// Stored userdata format (see add_callback):
+//
+//   int64 [0]: callable PyObject* (borrowed)
+//   int64 [1]: userdata PyObject* (borrowed; any Python object, None default)
+//
+// Both references are kept alive by the Python-side DrawList wrapper until
+// the next new_frame().
+//
+// Returns false if the command doesn't carry a Python callback (regular draw,
+// reset-render-state token, or a native callback installed by other code).
+static bool decode_drawlist_py_callback(const ImDrawCmd* cmd, nb::object* out_callable, nb::object* out_userdata) {
+    if (cmd->UserCallback != &drawlist_callback_py_wrapper || cmd->UserCallbackData == nullptr ||
+        cmd->UserCallbackDataSize < (int)(sizeof(intptr_t) * 2)) {
+        return false;
+    }
+    const intptr_t* data = (const intptr_t*)cmd->UserCallbackData;
+    if (out_callable) {
+        *out_callable = nb::borrow((PyObject*)data[0]);
+    }
+    if (out_userdata) {
+        *out_userdata = nb::borrow((PyObject*)data[1]);
+    }
+    return true;
+}
+
+static void drawlist_callback_py_wrapper(const ImDrawList* parent_list, const ImDrawCmd* cmd) {
+    nb::object callable, userdata;
+    if (!decode_drawlist_py_callback(cmd, &callable, &userdata)) {
+        return;
+    }
+    try {
+        nb::borrow<nb::callable>(callable)(parent_list, cmd, userdata);
     } catch (nb::python_error& e) {
         e.discard_as_unraisable("drawlist_callback_py_wrapper callback");
         return;
@@ -225,8 +241,62 @@ enum DrawListCallbackResult
     RESET_RENDER_STATE = 2,
 };
 
+static ImVec4 lerp_color(const ImVec4& a, const ImVec4& b, float t)
+{
+    return ImVec4(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+        a.w + (b.w - a.w) * t
+    );
+}
+
+static ImU32 bilinear_color(ImVec2 p, ImVec2 p_min, ImVec2 p_max, ImVec4 col_ul, ImVec4 col_ur, ImVec4 col_br, ImVec4 col_bl, float alpha_mul)
+{
+    const float w = ImMax(p_max.x - p_min.x, 1.0f);
+    const float h = ImMax(p_max.y - p_min.y, 1.0f);
+    const float u = ImClamp((p.x - p_min.x) / w, 0.0f, 1.0f);
+    const float v = ImClamp((p.y - p_min.y) / h, 0.0f, 1.0f);
+    ImVec4 top = lerp_color(col_ul, col_ur, u);
+    ImVec4 bottom = lerp_color(col_bl, col_br, u);
+    ImVec4 out = lerp_color(top, bottom, v);
+    out.w *= alpha_mul;
+    return ImGui::ColorConvertFloat4ToU32(out);
+}
+
+static void AddRectFilledMultiColorRounded(ImDrawList* draw_list, ImVec2 p_min, ImVec2 p_max, ImU32 col_ul, ImU32 col_ur, ImU32 col_br, ImU32 col_bl, float rounding, ImDrawFlags flags)
+{
+    if (((col_ul | col_ur | col_br | col_bl) & IM_COL32_A_MASK) == 0)
+        return;
+
+    if (rounding < 0.5f || (flags & ImDrawFlags_RoundCornersMask_) == ImDrawFlags_RoundCornersNone)
+    {
+        draw_list->AddRectFilledMultiColor(p_min, p_max, col_ul, col_ur, col_br, col_bl);
+        return;
+    }
+
+    const int vert_start = draw_list->VtxBuffer.Size;
+    draw_list->PathClear();
+    draw_list->PathRect(p_min, p_max, rounding, flags);
+    draw_list->PathFillConvex(IM_COL32_WHITE);
+    const int vert_end = draw_list->VtxBuffer.Size;
+
+    const ImVec4 c_ul = ImGui::ColorConvertU32ToFloat4(col_ul);
+    const ImVec4 c_ur = ImGui::ColorConvertU32ToFloat4(col_ur);
+    const ImVec4 c_br = ImGui::ColorConvertU32ToFloat4(col_br);
+    const ImVec4 c_bl = ImGui::ColorConvertU32ToFloat4(col_bl);
+
+    for (int i = vert_start; i < vert_end; ++i)
+    {
+        ImDrawVert& v = draw_list->VtxBuffer[i];
+        const float aa_alpha = (float)((v.col & IM_COL32_A_MASK) >> IM_COL32_A_SHIFT) / 255.0f;
+        v.col = bilinear_color(v.pos, p_min, p_max, c_ul, c_ur, c_br, c_bl, aa_alpha);
+    }
+}
+
 NB_MODULE(slimgui_ext, top) {
     nb::module_ m = top.def_submodule("imgui", "Dear ImGui bindings");
+    register_anim_bindings(top);
 
     m.attr("IMGUI_VERSION") = IMGUI_VERSION;
     m.attr("IMGUI_VERSION_NUM") = IMGUI_VERSION_NUM;
@@ -755,6 +825,23 @@ NB_MODULE(slimgui_ext, top) {
         .def_ro("vtx_offset", &ImDrawCmd::VtxOffset)
         .def_ro("idx_offset", &ImDrawCmd::IdxOffset)
         .def_ro("elem_count", &ImDrawCmd::ElemCount)
+        .def_prop_ro("has_callback", [](const ImDrawCmd* cmd) {
+            return cmd->UserCallback != nullptr;
+        })
+        .def_prop_ro("is_reset_render_state_callback", [](const ImDrawCmd* cmd) {
+            return cmd->UserCallback == ImDrawCallback_ResetRenderState;
+        })
+        .def_prop_ro("callback_userdata", [](const ImDrawCmd* cmd) -> nb::object {
+            nb::object userdata = nb::none();
+            decode_drawlist_py_callback(cmd, nullptr, &userdata);
+            return userdata;
+        }, "Userdata passed to `DrawList.add_callback` (int, bytes or an arbitrary object), or None if this command has no Python callback.")
+        .def_prop_ro("callback", [](const ImDrawCmd* cmd) -> nb::object {
+            nb::object callable = nb::none();
+            decode_drawlist_py_callback(cmd, &callable, nullptr);
+            return callable;
+        }, "The Python callable passed to `DrawList.add_callback`, or None if this command has no Python callback.\n"
+           "Together with `callback_userdata` this lets a renderer inspect callback commands without running them.")
         .def("run_callback", [](const ImDrawCmd* cmd, ImDrawList* dl) {
             if (cmd->UserCallback) {
                 if (cmd->UserCallback == ImDrawCallback_ResetRenderState) {
@@ -817,7 +904,7 @@ NB_MODULE(slimgui_ext, top) {
             auto uvs       = nb::ndarray<nb::numpy, float,   nb::ndim<2>>(uv_data,  {vn2, 2}, uv_owner);
             auto colors    = nb::ndarray<nb::numpy, uint8_t, nb::ndim<2>>(col_data, {vn2, 4}, col_owner);
 
-            // --- 命令数据: 返回 Python list of (tex_id, clip_tuple, indices_ndarray) ---
+            // --- 命令数据: 返回 Python list of (tex_id, clip_tuple, indices_ndarray, callback, userdata) ---
             nb::list cmd_list;
             for (int i = 0; i < cmd_count; i++) {
                 int64_t tex_id = (int64_t)cmd_src[i].TexRef.GetTexID();
@@ -825,22 +912,117 @@ NB_MODULE(slimgui_ext, top) {
                     cmd_src[i].ClipRect.x, cmd_src[i].ClipRect.y,
                     cmd_src[i].ClipRect.z, cmd_src[i].ClipRect.w
                 );
-                // 预切索引: uint16 → int32, 每个 cmd 独立数组
+                // 预切索引: uint16 → int32, 每个 cmd 独立数组。VtxOffset 直接
+                // 折进索引: 启用 RendererHasVtxOffset 后, 大 draw list (>64k
+                // 顶点) 的命令携带相对基址的 16 位索引; 消费方 (如 Blender
+                // gpu) 没有 BaseVertex 绘制, 必须在此还原为全局索引。
                 int elem = (int)cmd_src[i].ElemCount;
                 int off  = (int)cmd_src[i].IdxOffset;
+                int32_t vtx_off = (int32_t)cmd_src[i].VtxOffset;
                 int32_t* sub_idx = new int32_t[elem];
                 for (int j = 0; j < elem; j++) {
-                    sub_idx[j] = (int32_t)idx_src[off + j];
+                    sub_idx[j] = (int32_t)idx_src[off + j] + vtx_off;
                 }
                 nb::capsule sub_owner(sub_idx, [](void* p) noexcept { delete[] (int32_t*)p; });
                 auto idx_arr = nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(sub_idx, {(size_t)elem}, sub_owner);
-                cmd_list.append(nb::make_tuple(tex_id, clip, idx_arr));
+
+                // callback 命令不丢弃: 附带 callable + userdata（强引用, 可在帧后使用）
+                nb::object cb_obj = nb::none();
+                nb::object ud_obj = nb::none();
+                if (cmd_src[i].UserCallback == ImDrawCallback_ResetRenderState) {
+                    cb_obj = nb::cast(DrawListCallbackResult::RESET_RENDER_STATE);
+                } else {
+                    decode_drawlist_py_callback(&cmd_src[i], &cb_obj, &ud_obj);
+                }
+                cmd_list.append(nb::make_tuple(tex_id, clip, idx_arr, cb_obj, ud_obj));
             }
 
             return nb::make_tuple(positions, uvs, colors, cmd_list);
         }, "Pack vertex/index/command data into numpy arrays in one C++ call.\n"
            "Returns: (positions[N,2], uvs[N,2], colors[N,4](u8),\n"
-           "          [(tex_id, (x1,y1,x2,y2), indices[M](i32)), ...])")
+           "          [(tex_id, (x1,y1,x2,y2), indices[M](i32), callback, userdata), ...])\n"
+           "\n"
+           "For regular draw commands `callback` and `userdata` are None. For commands\n"
+           "added with `DrawList.add_callback` they carry the Python callable and its\n"
+           "userdata (the consumer decides whether to invoke the callable or dispatch on\n"
+           "the userdata). A reset-render-state token has\n"
+           "`callback == DrawListCallbackResult.RESET_RENDER_STATE`.")
+        .def("get_render_data_merged", [](const ImDrawList* drawList) -> nb::tuple {
+            const int vtx_count = drawList->VtxBuffer.Size;
+            const int idx_count = drawList->IdxBuffer.Size;
+            const int cmd_count = drawList->CmdBuffer.Size;
+            const ImDrawVert* vtx_src = drawList->VtxBuffer.Data;
+            const ImDrawIdx*  idx_src = drawList->IdxBuffer.Data;
+            const ImDrawCmd*  cmd_src = drawList->CmdBuffer.Data;
+
+            // --- 顶点数据: 拆分 AoS → SoA (与 get_render_data 相同) ---
+            float*    pos_data = new float[vtx_count * 2];
+            float*    uv_data  = new float[vtx_count * 2];
+            uint8_t*  col_data = new uint8_t[vtx_count * 4];
+            for (int i = 0; i < vtx_count; i++) {
+                pos_data[i * 2 + 0]     = vtx_src[i].pos.x;
+                pos_data[i * 2 + 1] = vtx_src[i].pos.y;
+                uv_data[i * 2 + 0]      = vtx_src[i].uv.x;
+                uv_data[i * 2 + 1]  = vtx_src[i].uv.y;
+                uint32_t c = vtx_src[i].col;
+                col_data[i * 4 + 0]     = (uint8_t)(c);
+                col_data[i * 4 + 1] = (uint8_t)(c >> 8);
+                col_data[i * 4 + 2] = (uint8_t)(c >> 16);
+                col_data[i * 4 + 3] = (uint8_t)(c >> 24);
+            }
+
+            size_t vn2 = (size_t)vtx_count;
+            nb::capsule pos_owner(pos_data, [](void* p) noexcept { delete[] (float*)p; });
+            nb::capsule uv_owner(uv_data,  [](void* p) noexcept { delete[] (float*)p; });
+            nb::capsule col_owner(col_data, [](void* p) noexcept { delete[] (uint8_t*)p; });
+
+            auto positions = nb::ndarray<nb::numpy, float,   nb::ndim<2>>(pos_data, {vn2, 2}, pos_owner);
+            auto uvs       = nb::ndarray<nb::numpy, float,   nb::ndim<2>>(uv_data,  {vn2, 2}, uv_owner);
+            auto colors    = nb::ndarray<nb::numpy, uint8_t, nb::ndim<2>>(col_data, {vn2, 4}, col_owner);
+
+            // --- 索引数据: 整张缓冲一次性转全局 int32, vtx_offset 逐命令折叠 ---
+            // 与 get_render_data 的区别: 不再逐命令切出独立数组, 而是返回整表 + 每命令
+            // (idx_offset, elem_count)。消费方建一个 GPUIndexBuf + 一个 batch, 用
+            // draw_range(idx_offset, elem_count) 分段绘制, 省掉 Python 侧的拼接。
+            int32_t* idx_data = new int32_t[idx_count > 0 ? idx_count : 1];
+            nb::list cmd_list;
+            for (int i = 0; i < cmd_count; i++) {
+                const ImDrawCmd& cmd = cmd_src[i];
+                int elem = (int)cmd.ElemCount;
+                int off  = (int)cmd.IdxOffset;
+                int32_t vtx_off = (int32_t)cmd.VtxOffset;
+                // 折叠当前命令的索引区间到全局表 (callback 命令 elem==0, 不写)
+                for (int j = 0; j < elem; j++) {
+                    idx_data[off + j] = (int32_t)idx_src[off + j] + vtx_off;
+                }
+
+                int64_t tex_id = (int64_t)cmd.TexRef.GetTexID();
+                auto clip = nb::make_tuple(cmd.ClipRect.x, cmd.ClipRect.y, cmd.ClipRect.z, cmd.ClipRect.w);
+
+                nb::object cb_obj = nb::none();
+                nb::object ud_obj = nb::none();
+                if (cmd.UserCallback == ImDrawCallback_ResetRenderState) {
+                    cb_obj = nb::cast(DrawListCallbackResult::RESET_RENDER_STATE);
+                } else {
+                    decode_drawlist_py_callback(&cmd, &cb_obj, &ud_obj);
+                }
+                // 命令元数据: 偏移 + 数量 (普通 int), 而非切好的数组
+                cmd_list.append(nb::make_tuple(tex_id, clip, off, elem, cb_obj, ud_obj));
+            }
+
+            nb::capsule idx_owner(idx_data, [](void* p) noexcept { delete[] (int32_t*)p; });
+            auto indices = nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(idx_data, {(size_t)idx_count}, idx_owner);
+
+            return nb::make_tuple(positions, uvs, colors, indices, cmd_list);
+        }, "Like `get_render_data` but returns ONE merged index array for the whole draw\n"
+           "list plus per-command (idx_offset, elem_count) ranges, instead of pre-sliced\n"
+           "per-command index arrays. Lets a renderer build a single index buffer + batch\n"
+           "and draw each command with a ranged draw call.\n"
+           "Returns: (positions[N,2], uvs[N,2], colors[N,4](u8), indices[I](i32),\n"
+           "          [(tex_id, (x1,y1,x2,y2), idx_offset, elem_count, callback, userdata), ...])\n"
+           "\n"
+           "Indices already have per-command vtx_offset folded in (global into the vertex\n"
+           "arrays). `callback`/`userdata` semantics match `get_render_data`.")
         .def_prop_ro("commands", [](const ImDrawList* drawList) {
             return nb::make_iterator(nb::type<const ImDrawList*>(), "iterator", drawList->CmdBuffer.begin(), drawList->CmdBuffer.end());
         }, nb::keep_alive<0, 1>())
@@ -868,6 +1050,9 @@ NB_MODULE(slimgui_ext, top) {
         .def("add_rect_filled_multi_color", [](ImDrawList* drawList, ImVec2 p_min, ImVec2 p_max, ImU32 col_upr_left, ImU32 col_upr_right, ImU32 col_bot_right, ImU32 col_bot_left) {
             drawList->AddRectFilledMultiColor(p_min, p_max, col_upr_left, col_upr_right, col_bot_right, col_bot_left);
         }, "p_min"_a, "p_max"_a, "col_upr_left"_a, "col_upr_right"_a, "col_bot_right"_a, "col_bot_left"_a)
+        .def("add_rect_filled_multi_color_rounded", [](ImDrawList* drawList, ImVec2 p_min, ImVec2 p_max, ImU32 col_upr_left, ImU32 col_upr_right, ImU32 col_bot_right, ImU32 col_bot_left, float rounding, ImDrawFlags_ flags) {
+            AddRectFilledMultiColorRounded(drawList, p_min, p_max, col_upr_left, col_upr_right, col_bot_right, col_bot_left, rounding, flags);
+        }, "p_min"_a, "p_max"_a, "col_upr_left"_a, "col_upr_right"_a, "col_bot_right"_a, "col_bot_left"_a, "rounding"_a = 0.0f, "flags"_a.sig("DrawFlags.NONE") = 0)
         .def("add_quad", [](ImDrawList* drawList, ImVec2 p1, ImVec2 p2, ImVec2 p3, ImVec2 p4, ImU32 col, float thickness) {
             drawList->AddQuad(p1, p2, p3, p4, col, thickness);
         }, "p1"_a, "p2"_a, "p3"_a, "p4"_a, "col"_a, "thickness"_a = 1.0f)
@@ -939,30 +1124,13 @@ NB_MODULE(slimgui_ext, top) {
         .def("channels_split", &ImDrawList::ChannelsSplit, "count"_a)
         .def("channels_merge", &ImDrawList::ChannelsMerge)
         .def("channels_set_current", &ImDrawList::ChannelsSetCurrent, "n"_a)
-        .def("add_callback", [](ImDrawList* drawList, DrawListCallbackCallable cb, std::variant<int64_t, nb::bytes> userdatav) {
-            const void* cb_ptr = (const void*)cb.ptr();
-            if (nb::bytes* bytes = std::get_if<nb::bytes>(&userdatav)) {
-                intptr_t tmp[256];
-                int64_t required_size = sizeof(intptr_t) + bytes->size();
-
-                tmp[0] = (intptr_t)cb_ptr | 1;
-
-                // Need a temp heap alloc
-                if (required_size > (int64_t)sizeof(tmp)) {
-                    std::vector<uint8_t> buf(required_size);
-                    memcpy(&buf[0], tmp, sizeof(intptr_t));
-                    memcpy(&buf[sizeof(intptr_t)], bytes->c_str(), bytes->size());
-                    drawList->AddCallback(&drawlist_callback_py_wrapper, &buf[0], required_size);
-                } else {
-                    memcpy(tmp + 1, bytes->c_str(), bytes->size());
-                    drawList->AddCallback(&drawlist_callback_py_wrapper, tmp, required_size);
-                }
-            } else {
-                int64_t userdata_int = std::get<int64_t>(userdatav);
-                intptr_t userdata[2] = { (intptr_t)cb_ptr, userdata_int };
-                drawList->AddCallback(&drawlist_callback_py_wrapper, userdata, sizeof(userdata));
-            }
-        }, "callback"_a, "userdata"_a = 0)
+        .def("add_callback", [](ImDrawList* drawList, DrawListCallbackCallable cb, nb::object userdata) {
+            // Both the callable and the userdata are stored as borrowed
+            // PyObject* references; the Python-side DrawList wrapper keeps
+            // them alive until the next new_frame().
+            intptr_t data[2] = { (intptr_t)cb.ptr(), (intptr_t)userdata.ptr() };
+            drawList->AddCallback(&drawlist_callback_py_wrapper, data, sizeof(data));
+        }, "callback"_a, "userdata"_a.none() = nb::none())
         .def("add_reset_render_state_callback", [](ImDrawList* drawList) {
             drawList->AddCallback(ImDrawCallback_ResetRenderState, nullptr, 0);
         }, "Add a callback to reset the renderer backend's render state to default.\n"
@@ -1022,6 +1190,86 @@ NB_MODULE(slimgui_ext, top) {
 
 #include "imgui_enums.inl"
 #include "imgui_funcs.inl"
+
+    m.def("clear_active_id", []() {
+        ImGui::ClearActiveID();
+    }, "Clear the active item id (e.g. unfocus InputText so overlapping widgets can capture mouse). Uses Dear ImGui internal API.");
+
+    m.def("temp_input_is_active", [](std::optional<ImGuiID> id) {
+        ImGuiID target_id = id.value_or(ImGui::GetItemID());
+        return ImGui::TempInputIsActive(target_id);
+    }, "id"_a = nb::none(),
+    "Return true when an item's temporary scalar/text input is active. If id is None, checks the last submitted item.");
+
+    m.def("is_item_active_as_input_text", []() {
+        return ImGui::IsItemActiveAsInputText();
+    }, "Return true when the last submitted item is currently active as an InputText field. Uses Dear ImGui internal API.");
+
+    m.def("get_active_id", []() {
+        return ImGui::GetActiveID();
+    }, "Return the currently active item id, or 0 if none. Uses Dear ImGui internal API.");
+
+    m.def("get_hovered_id", []() {
+        return ImGui::GetHoveredID();
+    }, "Return the currently hovered item id, or 0 if none. Uses Dear ImGui internal API.");
+
+    m.def("get_focus_id", []() {
+        return ImGui::GetFocusID();
+    }, "Return the current navigation/focus item id, or 0 if none. Uses Dear ImGui internal API.");
+
+    m.def("get_temp_input_id", []() {
+        ImGuiContext& g = *GImGui;
+        return g.TempInputId;
+    }, "Return the current temporary input id, or 0 if none. Uses Dear ImGui internal state.");
+
+    m.def("get_last_active_id", []() {
+        ImGuiContext& g = *GImGui;
+        return g.LastActiveId;
+    }, "Return the last non-zero active item id. Uses Dear ImGui internal state.");
+
+    m.def("get_last_active_id_timer", []() {
+        ImGuiContext& g = *GImGui;
+        return g.LastActiveIdTimer;
+    }, "Return seconds since the last active item became active. Uses Dear ImGui internal state.");
+
+    m.def("get_item_flags", []() {
+        return ImGui::GetItemFlags();
+    }, "Return flags for the last submitted item. Uses Dear ImGui internal API.");
+
+    m.def("get_item_status_flags", []() {
+        return ImGui::GetItemStatusFlags();
+    }, "Return status flags for the last submitted item as an integer bitmask. Uses Dear ImGui internal API.");
+
+    m.def("keep_alive_id", [](ImGuiID id) {
+        ImGui::KeepAliveID(id);
+    }, "id"_a,
+    "Mark an item id as alive for the current frame. Useful for custom widgets using ButtonBehavior-like state. Uses Dear ImGui internal API.");
+
+    m.def("focus_item", []() {
+        ImGui::FocusItem();
+    }, "Focus the last submitted item without activating it. Uses Dear ImGui internal API.");
+
+    m.def("activate_item_by_id", [](ImGuiID id) {
+        ImGui::ActivateItemByID(id);
+    }, "id"_a,
+    "Queue activation for an item id on the next frame when that item is submitted. Uses Dear ImGui internal API.");
+
+    m.def("set_active_id_using_all_keyboard_keys", []() {
+        ImGui::SetActiveIdUsingAllKeyboardKeys();
+    }, "Declare that the current active item wants to own all keyboard keys. Uses Dear ImGui internal API.");
+
+    m.def("is_active_id_using_nav_dir", [](ImGuiDir dir) {
+        return ImGui::IsActiveIdUsingNavDir(dir);
+    }, "dir"_a,
+    "Return true when the active item is using the given navigation direction. Uses Dear ImGui internal API.");
+
+    m.def("consume_io_mouse_clicked", [](ImGuiMouseButton_ button) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.MouseClicked[button] = false;
+    }, "button"_a,
+    "Clear io.MouseClicked[button] for the current frame so widgets submitted afterward (e.g. InputText) do not treat it as a new click.\n"
+    "MouseDown stays true; pair with clear_active_id() when stealing mouse drags from an overlapping InputText.");
+
     // "Internal" object getters that receive a context pointer.  Such functions
     // don't exist in the public ImGui API, but we provide them so that we
     // can correctly model object ownership in Python.
@@ -1104,6 +1352,15 @@ NB_MODULE(slimgui_ext, top) {
     });
     m.def("get_draw_data", &ImGui::GetDrawData, nb::rv_policy::reference);
     m.def("get_main_viewport", &ImGui::GetMainViewport, nb::rv_policy::reference);
+
+    m.def("set_initial_fringe_scale", [](float scale) {
+        ImGui::GetDrawListSharedData()->InitialFringeScale = scale;
+    }, "scale"_a,
+    "Set the anti-aliasing fringe scale (default 1.0) applied to draw lists reset after this call "
+    "within the current frame. Call right after new_frame() and before any window/draw submission. "
+    "When the draw output is upscaled by a model matrix of factor S, pass 1.0/S so the AA fringe and "
+    "line/border edges stay ~1 physical pixel wide instead of being stretched (blurry). "
+    "Note: any value != 1.0 disables the baked-texture AA line path, so AA lines use the polygon path.");
 
     // Error recovery: save/restore imgui stack state
     m.def("error_recovery_store_state", []() {

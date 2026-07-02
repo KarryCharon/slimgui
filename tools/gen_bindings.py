@@ -708,21 +708,26 @@ def generate():
     subprocess.run([sys.executable, "-m", "pip", "install", "--no-build-isolation", "."],
                    cwd=ROOT, check=True)
 
-    # --- Version check ---
-    import toml
-    imgui_version = toml.load(ROOT / "pyproject.toml")["tool"]["slimgui"]["imgui_version"]
-    subprocess.run([sys.executable, "-c",
-                    f"from slimgui import imgui; assert imgui.get_version() == '{imgui_version}'"],
-                   check=True)
-
-    # --- Generate stubs ---
-    print("\n=== Generating stubs ===")
+    # --- Locate freshly built extension ---
     import glob
-    build_dirs = glob.glob(str(ROOT / "build" / "*/"))
+    build_dirs = sorted(glob.glob(str(ROOT / "build" / "*/")), key=lambda p: Path(p).stat().st_mtime, reverse=True)
     if not build_dirs:
         print("Error: no build directory found under build/", file=sys.stderr)
         sys.exit(1)
     build_dir = build_dirs[0].rstrip("/")
+
+    # --- Version check ---
+    import os
+    import toml
+    imgui_version = toml.load(ROOT / "pyproject.toml")["tool"]["slimgui"]["imgui_version"]
+    check_env = os.environ.copy()
+    check_env["PYTHONPATH"] = build_dir + os.pathsep + check_env.get("PYTHONPATH", "")
+    subprocess.run([sys.executable, "-c",
+                    f"import slimgui_ext; assert slimgui_ext.imgui.get_version() == '{imgui_version}'; assert slimgui_ext.anim.IMANIM_VERSION"],
+                   check=True, env=check_env)
+
+    # --- Generate stubs ---
+    print("\n=== Generating stubs ===")
     subprocess.run([sys.executable, "-m", "nanobind.stubgen",
                     "-i", build_dir, "-q", "-m", "slimgui_ext", "-r",
                     "-O", str(ROOT / "src" / "slimgui")], check=True)
@@ -731,6 +736,10 @@ def generate():
     pyi_file = str(ROOT / "src" / "slimgui" / "slimgui_ext" / "imgui.pyi")
     subprocess.run([sys.executable, str(ROOT / "tools" / "stubfixer.py"),
                     pyi_file, "-o", pyi_file], check=True)
+    anim_pyi_file = ROOT / "src" / "slimgui" / "slimgui_ext" / "anim.pyi"
+    if anim_pyi_file.exists():
+        subprocess.run([sys.executable, str(ROOT / "tools" / "stubfixer.py"),
+                        str(anim_pyi_file), "-o", str(anim_pyi_file)], check=True)
 
     # --- Amend docs into stubs ---
     print("\n=== Amending docstrings ===")

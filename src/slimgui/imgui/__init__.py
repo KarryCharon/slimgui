@@ -44,7 +44,7 @@ class DrawList:
 
     def __init__(self, drawlist: imgui_ext.DrawList):
         self._dl = drawlist
-        self._callback_refs: list[Callable] = []
+        self._callback_refs: list[object] = []
 
     @property
     def vtx_buffer_size(self) -> int: return self._dl.vtx_buffer_size
@@ -64,13 +64,16 @@ class DrawList:
     def _clear_callback_refs(self):
         self._callback_refs.clear()
 
-    def add_callback(self, callback: Callable[[imgui_ext.DrawList, imgui_ext.DrawCmd, int | bytes], None], userdata: int | bytes = 0) -> None:
+    def add_callback(self, callback: Callable[[imgui_ext.DrawList, imgui_ext.DrawCmd, Any], None], userdata: Any = None) -> None:
         """
         May be used to alter render state (change sampler, blending, current shader). May be used to emit custom rendering commands (difficult to do correctly, but possible).
 
         Your backend renderer must call `DrawCmd.run_callback()` and handle the result appropriately.  All standard backends honor this.
 
-        Immutable userdata can be passed as either an `int` or a `bytes` object.  This data will be passed down to the callback when it's invoked in the backend renderer.
+        `userdata` can be any Python object (stored by reference; this wrapper keeps it alive until the
+        next `imgui.new_frame()`, same as the callback itself).  It is passed down to the callback when
+        it's invoked in the backend renderer, and can also be inspected without running the callback via
+        `DrawCmd.callback_userdata` or `DrawList.get_render_data()`.
 
         Slimgui specific details:
 
@@ -83,8 +86,12 @@ class DrawList:
         """
 
         self._dl.add_callback(callback, userdata)
-        # Keep track of callbacks so that they're not deallocated before the next `imgui.new_frame()`.
+        # Keep track of callbacks and userdata (both stored as borrowed
+        # references on the native side) so that they're not deallocated
+        # before the next `imgui.new_frame()`.
         self._callback_refs.append(callback)
+        if userdata is not None:
+            self._callback_refs.append(userdata)
 
     def add_reset_render_state_callback(self) -> None:
         """
@@ -130,6 +137,9 @@ class DrawList:
 
     def add_rect_filled_multi_color(self, p_min: tuple[float, float], p_max: tuple[float, float], col_upr_left: int, col_upr_right: int, col_bot_right: int, col_bot_left: int) -> None:
         self._dl.add_rect_filled_multi_color(p_min, p_max, col_upr_left, col_upr_right, col_bot_right, col_bot_left)
+
+    def add_rect_filled_multi_color_rounded(self, p_min: tuple[float, float], p_max: tuple[float, float], col_upr_left: int, col_upr_right: int, col_bot_right: int, col_bot_left: int, rounding: float = 0.0, flags: imgui_ext.DrawFlags = imgui_ext.DrawFlags.NONE) -> None:
+        self._dl.add_rect_filled_multi_color_rounded(p_min, p_max, col_upr_left, col_upr_right, col_bot_right, col_bot_left, rounding, flags)
 
     def add_quad(self, p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float], p4: tuple[float, float], col: int, thickness: float = 1.0) -> None:
         self._dl.add_quad(p1, p2, p3, p4, col, thickness)

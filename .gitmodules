@@ -1,0 +1,3 @@
+[submodule "src/cpp/ImAnim"]
+	path = src/cpp/ImAnim
+	url = https://github.com/soufianekhiat/ImAnim.git

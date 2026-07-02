@@ -220,6 +220,13 @@ class OpenGLRenderer(BaseRenderer):
 
     #--------------------------------------------------------------------
 
+    def _run_cmd_callback(self, cmd: imgui.DrawCmd, drawlist: imgui.DrawList) -> imgui.DrawListCallbackResult:
+        """Per-command callback dispatch hook. Subclasses may intercept
+        callback commands (e.g. recognize a payload in
+        `cmd.callback_userdata` and draw it themselves) instead of letting
+        the stored callback run."""
+        return cmd.run_callback(drawlist)
+
     def render(self, draw_data: imgui.DrawData):
         # perf: local for faster access
         io = imgui.get_io()
@@ -269,7 +276,7 @@ class OpenGLRenderer(BaseRenderer):
             # todo: allow to iterate over _CmdList
             idx_type = gl.GL_UNSIGNED_SHORT if imgui.INDEX_SIZE == 2 else gl.GL_UNSIGNED_INT
             for cmd in drawlist.commands:
-                match cmd.run_callback(drawlist):
+                match self._run_cmd_callback(cmd, drawlist):
                     case imgui.DrawListCallbackResult.CALLBACK:
                         # callback was called, nothing further needed
                         pass

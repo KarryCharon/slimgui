@@ -1,10 +1,13 @@
-set(Python_EXECUTABLE ".venv/Scripts/python.exe")
 cmake_minimum_required(VERSION 3.15...3.27)
 
 # Use -Os (size) instead of -O3 (speed) for Release builds — smaller binary
 set(CMAKE_CXX_FLAGS_RELEASE "-Os -DNDEBUG" CACHE STRING "" FORCE)
 
 project(slimgui LANGUAGES CXX)
+
+if(MSVC)
+  add_compile_options(/utf-8)
+endif()
 
 option(SLIMGUI_INCLUDE_DEMO "Include imgui demo window (adds ~475K)" ON)
 
@@ -38,7 +41,9 @@ nanobind_add_module(slimgui_ext
   NB_DOMAIN slimgui_abi_domain
   LTO
 
+  src/anim_bindings.cpp
   src/slimgui_ext.cpp
+  src/cpp/ImAnim/im_anim.cpp
   ${IMGUI_SOURCES}
 )
 
@@ -56,6 +61,7 @@ nanobind_add_module(slimgui_ext
 # )
 
 include_directories(${CMAKE_SOURCE_DIR}/src/c/imgui)
+include_directories(${CMAKE_SOURCE_DIR}/src/cpp/ImAnim)
 
 if(APPLE)
   # Used by the default implementation for macOS clipboard access.
@@ -66,4 +72,5 @@ endif()
 
 install(TARGETS slimgui_ext LIBRARY DESTINATION slimgui)
 install(FILES "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/__init__.pyi" DESTINATION slimgui/slimgui_ext/)
+install(FILES "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/anim.pyi" DESTINATION slimgui/slimgui_ext/)
 install(FILES "${CMAKE_SOURCE_DIR}/src/slimgui/slimgui_ext/imgui.pyi" DESTINATION slimgui/slimgui_ext/)
