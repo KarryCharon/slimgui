@@ -2,12 +2,12 @@
 """Generate slimgui bindings using litgen.
 
 Reads imgui.h and generates:
-  - src/imgui_enums.inl   (C++ nanobind enum binding code)
-  - src/imgui_funcs.inl   (C++ nanobind function binding code)
+  - bindings/generated/imgui_enums.inl   (C++ nanobind enum binding code)
+  - bindings/generated/imgui_funcs.inl   (C++ nanobind function binding code)
 
 Simple functions are auto-generated via a litgen allowlist (LITGEN_FUNC_ALLOWLIST).
 Complex bindings (callbacks, out-params, custom types) remain hand-written in
-slimgui_ext.cpp.
+bindings/imgui_functions.cpp.
 
 Usage:
     python tools/gen_bindings.py [--imgui-h vendor/imgui/imgui.h]
@@ -22,8 +22,8 @@ import litgen
 
 ROOT = Path(__file__).resolve().parent.parent
 IMGUI_H = ROOT / "vendor" / "imgui" / "imgui.h"
-OUT_ENUMS_INL = ROOT / "src" / "imgui_enums.inl"
-OUT_FUNCS_INL = ROOT / "src" / "imgui_funcs.inl"
+OUT_ENUMS_INL = ROOT / "bindings" / "generated" / "imgui_enums.inl"
+OUT_FUNCS_INL = ROOT / "bindings" / "generated" / "imgui_funcs.inl"
 
 
 def preprocess_imgui_code(code: str) -> str:
@@ -269,7 +269,7 @@ def _join_regexes(patterns: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Functions that MUST remain hand-written in slimgui_ext.cpp
+# Functions that MUST remain hand-written in bindings/imgui_functions.cpp
 # (complex logic, custom types, out-param adaptation, callbacks, etc.)
 # ---------------------------------------------------------------------------
 MANUAL_FUNC_PATTERNS = [
@@ -552,7 +552,7 @@ def _postprocess_pydef_funcs(code: str) -> str:
     # litgen may generate "auto pyClassXxx = ..." variable declarations, remove them
     code = re.sub(r"auto py\w+ =\s*\n\s*", "", code)
     # litgen wraps in namespace block with its own submodule variable.
-    # We need to use the existing `m` variable from slimgui_ext.cpp.
+    # We need to use the existing `m` variable from bindings/imgui_functions.cpp.
     # Remove the namespace wrapper and replace pyNsImGui with m.
     code = re.sub(r'\{ // <namespace ImGui>\n', '', code)
     code = re.sub(r'    nb::module_ pyNsImGui = m\.def_submodule\("imgui", "namespace ImGui"\);\n', '', code)

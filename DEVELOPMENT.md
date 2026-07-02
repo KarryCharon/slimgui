@@ -15,7 +15,12 @@ uv sync --no-editable
 
 ## 仓库布局
 
-- `src/slimgui/` + `src/*.cpp` — slimgui 本体（Python 包 + C++ 绑定）
+- `src/slimgui/` — slimgui Python 包（含 stubs）
+- `bindings/` — 手写 C++ 绑定：`module.cpp`（入口）、`imgui_types.cpp`
+  （类绑定）、`imgui_functions.cpp`（函数绑定）、`anim.cpp`（ImAnim）；
+  `bindings/generated/` 是 gen_bindings.py 的输出，勿手改
+- `vendor/` — 第三方源码：`imgui`（imgui_vendor.py 管理）、
+  `imanim`（git 子模块）
 - `packages/fragfx/` — 独立的 fragfx 特效库（uv workspace 子包，
   纯 Python 零依赖，slimgui 本体不依赖它，仅 examples/tests 使用）
 
@@ -64,7 +69,7 @@ editable 模式下：
 - Python wrapper / stub 在 `src/slimgui/`（随 git 更新）。
 - 实际执行的 native 模块是 `.venv/lib/python3.12/site-packages/slimgui/slimgui_ext.abi3.so`（或 `pip install` 装进去的 wheel）。
 
-若刚改完 C++ 绑定（如 `src/slimgui_ext.cpp`）但没重装，运行时行为与源码
+若刚改完 C++ 绑定（如 `bindings/imgui_functions.cpp`）但没重装，运行时行为与源码
 不一致。**处理：** 再跑一次 `uv run python tools/gen_bindings.py --stubs`，或：
 
 ```bash

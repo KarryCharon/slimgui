@@ -41,8 +41,10 @@ nanobind_add_module(slimgui_ext
   NB_DOMAIN slimgui_abi_domain
   LTO
 
-  src/anim_bindings.cpp
-  src/slimgui_ext.cpp
+  bindings/module.cpp
+  bindings/imgui_types.cpp
+  bindings/imgui_functions.cpp
+  bindings/anim.cpp
   vendor/imanim/im_anim.cpp
   ${IMGUI_SOURCES}
 )
