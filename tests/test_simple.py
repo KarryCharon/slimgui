@@ -34,6 +34,30 @@ def test_utility_funcs():
     assert imgui.color_convert_u32_to_float4(0xffff0000) == (0, 0, 1, 1)
     assert imgui.color_convert_u32_to_float4(0xff0000ff) == (1, 0, 0, 1)
 
+
+def test_get_id_returns_item_id(frame_scope):
+    imgui.begin("GetIdWindow")
+
+    str_id = imgui.get_id("##GetIdString")
+    assert isinstance(str_id, int)
+    imgui.invisible_button("##GetIdString", (1, 1))
+    assert str_id == imgui.get_item_id()
+
+    int_id = imgui.get_id(42)
+    assert isinstance(int_id, int)
+
+    imgui.end()
+
+
+def test_text_links_return_clicked_state(frame_scope):
+    imgui.begin("TextLinkWindow")
+
+    assert imgui.text_link("Link") is False
+    assert imgui.text_link_open_url("URL", "https://example.com") is False
+
+    imgui.end()
+
+
 def test_current_context(imgui_context):
     assert imgui_context is not None
     assert imgui.get_current_context() is not None

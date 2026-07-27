@@ -336,8 +336,8 @@ void register_imgui_functions(nb::module_& m) {
     // ID stack/scopes
     m.def("push_id", [](const char* str_id) {  ImGui::PushID(str_id); }, "str_id"_a);
     m.def("push_id", [](int int_id) {  ImGui::PushID(int_id); }, "int_id"_a);
-    m.def("get_id", [](const char* str_id) {  ImGui::GetID(str_id); }, "str_id"_a);
-    m.def("get_id", [](int int_id)         {  ImGui::GetID(int_id); }, "int_id"_a);
+    m.def("get_id", [](const char* str_id) { return ImGui::GetID(str_id); }, "str_id"_a);
+    m.def("get_id", [](int int_id)         { return ImGui::GetID(int_id); }, "int_id"_a);
     m.def("pop_id", &ImGui::PopID);
 
     // Widgets: Text
@@ -373,8 +373,8 @@ void register_imgui_functions(nb::module_& m) {
     m.def("progress_bar", [](float fraction, ImVec2 size_arg, std::optional<std::string> overlay) {
         ImGui::ProgressBar(fraction, size_arg, overlay ? overlay.value().c_str() : nullptr);
     }, "fraction"_a, "size_arg"_a.sig("(-FLT_MIN, 0)") = ImVec2(-FLT_MIN, 0), "overlay"_a = nb::none());
-    m.def("text_link", [](const char* label) { ImGui::TextLink(label); }, "label"_a);
-    m.def("text_link_open_url", [](const char* label, std::optional<const char*> url) { ImGui::TextLinkOpenURL(label, url ? url.value() : nullptr); }, "label"_a, "url"_a = nb::none());
+    m.def("text_link", [](const char* label) { return ImGui::TextLink(label); }, "label"_a);
+    m.def("text_link_open_url", [](const char* label, std::optional<const char*> url) { return ImGui::TextLinkOpenURL(label, url ? url.value() : nullptr); }, "label"_a, "url"_a = nb::none());
 
     // Widgets: Images
     m.def("image", [](TextureRefOrID tex_ref, const ImVec2 image_size, const ImVec2 uv0, const ImVec2 uv1) {

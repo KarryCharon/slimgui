@@ -4716,13 +4716,13 @@ def push_id(int_id: int) -> None:
 
 
 @overload
-def get_id(str_id: str) -> None:
+def get_id(str_id: str) -> int:
     """Calculate unique ID (hash of whole ID stack + given parameter). e.g. if you want to query into ImGuiStorage yourself"""
     ...
 
 
 @overload
-def get_id(int_id: int) -> None:
+def get_id(int_id: int) -> int:
     ...
 
 
@@ -4790,12 +4790,12 @@ def progress_bar(fraction: float, size_arg: tuple[float, float] = (-FLT_MIN, 0),
     ...
 
 
-def text_link(label: str) -> None:
+def text_link(label: str) -> bool:
     """Hyperlink text button, return true when clicked"""
     ...
 
 
-def text_link_open_url(label: str, url: str | None = None) -> None:
+def text_link_open_url(label: str, url: str | None = None) -> bool:
     """Hyperlink text button, automatically open file/url when clicked"""
     ...
 
