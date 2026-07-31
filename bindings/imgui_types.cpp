@@ -829,7 +829,88 @@ void register_imgui_types(nb::module_& m) {
                 return std::nullopt;
             }
             return nb::make_iterator(nb::type<ImDrawData>(), "iterator", drawData.Textures->begin(), drawData.Textures->end());
-        }, nb::keep_alive<0, 1>());
+        }, nb::keep_alive<0, 1>())
+        .def("get_render_data_merged", [](ImDrawData& drawData) -> nb::tuple {
+            // 整帧合并: 所有 command list 的顶点/索引折叠进单一缓冲
+            // (每命令的 vtx_offset 与所在 list 的顶点基址一并折进索引),
+            // 消费方每帧只需建一个 vertex buffer + 一个 index buffer + 一个
+            // batch, 逐命令 draw_range。相比逐 list 的
+            // DrawList.get_render_data_merged 进一步省掉 N-1 次缓冲构建。
+            const int total_vtx = drawData.TotalVtxCount;
+            const int total_idx = drawData.TotalIdxCount;
+
+            float*   pos_data = new float[total_vtx > 0 ? (size_t)total_vtx * 2 : 1];
+            float*   uv_data  = new float[total_vtx > 0 ? (size_t)total_vtx * 2 : 1];
+            uint8_t* col_data = new uint8_t[total_vtx > 0 ? (size_t)total_vtx * 4 : 1];
+            int32_t* idx_data = new int32_t[total_idx > 0 ? (size_t)total_idx : 1];
+
+            nb::list cmd_list;
+            int vtx_base = 0;
+            int idx_base = 0;
+            for (int li = 0; li < drawData.CmdLists.Size; li++) {
+                const ImDrawList* dl = drawData.CmdLists[li];
+                const int vtx_count = dl->VtxBuffer.Size;
+                const ImDrawVert* vtx_src = dl->VtxBuffer.Data;
+                const ImDrawIdx*  idx_src = dl->IdxBuffer.Data;
+
+                for (int i = 0; i < vtx_count; i++) {
+                    const size_t o = (size_t)(vtx_base + i);
+                    pos_data[o * 2 + 0] = vtx_src[i].pos.x;
+                    pos_data[o * 2 + 1] = vtx_src[i].pos.y;
+                    uv_data[o * 2 + 0]  = vtx_src[i].uv.x;
+                    uv_data[o * 2 + 1]  = vtx_src[i].uv.y;
+                    const uint32_t c = vtx_src[i].col;
+                    col_data[o * 4 + 0] = (uint8_t)(c);
+                    col_data[o * 4 + 1] = (uint8_t)(c >> 8);
+                    col_data[o * 4 + 2] = (uint8_t)(c >> 16);
+                    col_data[o * 4 + 3] = (uint8_t)(c >> 24);
+                }
+
+                for (int i = 0; i < dl->CmdBuffer.Size; i++) {
+                    const ImDrawCmd& cmd = dl->CmdBuffer.Data[i];
+                    const int elem = (int)cmd.ElemCount;
+                    const int off  = (int)cmd.IdxOffset;
+                    const int32_t base = (int32_t)vtx_base + (int32_t)cmd.VtxOffset;
+                    for (int j = 0; j < elem; j++) {
+                        idx_data[idx_base + off + j] = (int32_t)idx_src[off + j] + base;
+                    }
+
+                    int64_t tex_id = (int64_t)cmd.TexRef.GetTexID();
+                    auto clip = nb::make_tuple(cmd.ClipRect.x, cmd.ClipRect.y, cmd.ClipRect.z, cmd.ClipRect.w);
+                    nb::object cb_obj = nb::none();
+                    nb::object ud_obj = nb::none();
+                    if (cmd.UserCallback == ImDrawCallback_ResetRenderState) {
+                        cb_obj = nb::cast(DrawListCallbackResult::RESET_RENDER_STATE);
+                    } else {
+                        decode_drawlist_py_callback(&cmd, &cb_obj, &ud_obj);
+                    }
+                    cmd_list.append(nb::make_tuple(tex_id, clip, idx_base + off, elem, cb_obj, ud_obj));
+                }
+                vtx_base += vtx_count;
+                idx_base += dl->IdxBuffer.Size;
+            }
+
+            nb::capsule pos_owner(pos_data, [](void* p) noexcept { delete[] (float*)p; });
+            nb::capsule uv_owner(uv_data,  [](void* p) noexcept { delete[] (float*)p; });
+            nb::capsule col_owner(col_data, [](void* p) noexcept { delete[] (uint8_t*)p; });
+            nb::capsule idx_owner(idx_data, [](void* p) noexcept { delete[] (int32_t*)p; });
+
+            const size_t vn = (size_t)total_vtx;
+            auto positions = nb::ndarray<nb::numpy, float,   nb::ndim<2>>(pos_data, {vn, 2}, pos_owner);
+            auto uvs       = nb::ndarray<nb::numpy, float,   nb::ndim<2>>(uv_data,  {vn, 2}, uv_owner);
+            auto colors    = nb::ndarray<nb::numpy, uint8_t, nb::ndim<2>>(col_data, {vn, 4}, col_owner);
+            auto indices   = nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(idx_data, {(size_t)total_idx}, idx_owner);
+
+            return nb::make_tuple(positions, uvs, colors, indices, cmd_list);
+        }, "Merge ALL command lists of this frame into single vertex/index arrays.\n"
+           "Per-command vtx_offset and per-list vertex bases are folded into the\n"
+           "global int32 index array, so a renderer can build one vertex buffer +\n"
+           "one index buffer + one batch per frame and draw each command with a\n"
+           "ranged draw call.\n"
+           "Returns: (positions[N,2], uvs[N,2], colors[N,4](u8), indices[I](i32),\n"
+           "          [(tex_id, (x1,y1,x2,y2), idx_offset, elem_count, callback, userdata), ...])\n"
+           "\n"
+           "`callback`/`userdata` semantics match `DrawList.get_render_data`.");
      nb::class_<ImGuiPayload>(m, "Payload", "Data payload for Drag and Drop operations: `accept_drag_drop_payload()`, `get_drag_drop_payload()`")
         .def("is_data_type", &ImGuiPayload::IsDataType)
         .def("is_preview", &ImGuiPayload::IsPreview)

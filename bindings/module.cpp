@@ -4,6 +4,7 @@
 void register_anim_bindings(nb::module_& top);
 void register_imgui_types(nb::module_& m);
 void register_imgui_functions(nb::module_& m);
+void register_primlist(nb::module_& m);
 
 // imconfig.h 的 IM_ASSERT 挂钩（imgui 各编译单元 extern 引用，须唯一定义）
 void slimgui_assert(const char* file, int line, const char* expr)
@@ -41,6 +42,7 @@ NB_MODULE(slimgui_ext, top) {
 
     register_imgui_types(m);
     register_imgui_functions(m);
+    register_primlist(m);
 
     // Disable Nanobind leak warnings by default.
     nb::set_leak_warnings(false);

@@ -21,6 +21,8 @@ find_package(nanobind CONFIG REQUIRED)
 
 #add_definitions(-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS=1)
 add_definitions(-DIMGUI_DISABLE_OBSOLETE_KEYIO=1)
+# 32 位码点: 支持 BMP 之外的字符(emoji 等 U+10000 以上平面)
+add_definitions(-DIMGUI_USE_WCHAR32=1)
 
 set(IMGUI_SOURCES
   vendor/imgui/imgui.cpp
@@ -44,6 +46,7 @@ nanobind_add_module(slimgui_ext
   bindings/module.cpp
   bindings/imgui_types.cpp
   bindings/imgui_functions.cpp
+  bindings/primlist.cpp
   bindings/anim.cpp
   vendor/imanim/im_anim.cpp
   ${IMGUI_SOURCES}

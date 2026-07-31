@@ -1433,6 +1433,19 @@ class DrawData:
     @property
     def textures(self) -> Iterator[TextureData] | None: ...
 
+    def get_render_data_merged(self) -> tuple:
+        """
+        Merge ALL command lists of this frame into single vertex/index arrays.
+        Per-command vtx_offset and per-list vertex bases are folded into the
+        global int32 index array, so a renderer can build one vertex buffer +
+        one index buffer + one batch per frame and draw each command with a
+        ranged draw call.
+        Returns: (positions[N,2], uvs[N,2], colors[N,4](u8), indices[I](i32),
+                  [(tex_id, (x1,y1,x2,y2), idx_offset, elem_count, callback, userdata), ...])
+
+        `callback`/`userdata` semantics match `DrawList.get_render_data`.
+        """
+
 class Payload:
     """
     Data payload for Drag and Drop operations: `accept_drag_drop_payload()`, `get_drag_drop_payload()`
@@ -5470,6 +5483,42 @@ def save_ini_settings_to_memory() -> str:
     """Return a zero-terminated string with the .ini data which you can save by your own mean. call when io.WantSaveIniSettings is set, then save data by your own mean and clear io.WantSaveIniSettings."""
     ...
 
+
+class PrimList:
+    """
+    Retained primitive list for layout-once / replay-per-frame widgets
+    (e.g. markdown renderers). Fill with `add_*` at layout time, call
+    `finalize()` once, then call `render()` each frame: it bisects the
+    y-sorted primitives against the clip range and submits everything to
+    the draw list in native code.
+    """
+
+    def __init__(self) -> None: ...
+
+    def add_text(self, x: float, y: float, h: float, font: Font, size: float, col: int, text: str, wrap_w: float = 0.0, link_gid: int = -1) -> None:
+        """
+        Add a text primitive. `h` is the line height used for culling;
+        `wrap_w` > 0 enables word wrap; `link_gid` >= 0 marks a hyperlink
+        group recolored to `hover_col` when `render(hovered_gid=...)` matches.
+        """
+
+    def add_rect_filled(self, x: float, y: float, w: float, h: float, col: int, rounding: float = 0.0) -> None: ...
+
+    def add_rect(self, x: float, y: float, w: float, h: float, col: int, rounding: float = 0.0, thickness: float = 1.0) -> None: ...
+
+    def finalize(self) -> None:
+        """
+        Stable-sort primitives by y and build the bisect index. Call once
+        after all `add_*` calls; `render()` requires it.
+        """
+
+    def render(self, draw_list: DrawList, ox: float, oy: float, clip_y0: float, clip_y1: float, hovered_gid: int = -1, hover_col: int = 0) -> None:
+        """
+        Replay visible primitives into `draw_list` at origin (ox, oy),
+        culled to the [clip_y0, clip_y1] screen-space range.
+        """
+
+    def __len__(self) -> int: ...
 
 def set_nanobind_leak_warnings(enable: bool) -> None:
     ...
