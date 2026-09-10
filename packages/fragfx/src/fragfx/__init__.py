@@ -57,7 +57,7 @@ from .effects import TemplateStore, preset_templates
 from .glsl import dump as dump_glsl
 from .lib import MAX_PARTICLES
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     # vocabulary namespaces

@@ -41,6 +41,8 @@ vec3 hsv2rgb(float h, float s, float v) {
 # Perimeter parameterization matching vfx_rounded_rect_point_at():
 # top edge -> tr arc -> right edge -> br arc -> bottom edge -> bl arc ->
 # left edge -> tl arc.
+# Every `else` body below must stay braced: Blender 5.2's GLSL preprocessor
+# (shader_tool grammar, upstream #161299) corrupts the heap on `else <stmt>;`.
 LIBRARY.register(
     "rect_path_t",
     """
@@ -64,20 +66,30 @@ float rect_path_t(vec2 p, vec2 p_min, vec2 p_max, float rounding) {
         bool bottom = p.y > ic_max.y;
         vec2 cc = vec2(right ? ic_max.x : ic_min.x, bottom ? ic_max.y : ic_min.y);
         float a = atan(p.y - cc.y, p.x - cc.x);
-        if (right && !bottom)       s = top_len + (a + HALF_PI) / HALF_PI * arc_len;
-        else if (right && bottom)   s = top_len + arc_len + side_len + a / HALF_PI * arc_len;
-        else if (!right && bottom)  s = 2.0 * top_len + 2.0 * arc_len + side_len + (a - HALF_PI) / HALF_PI * arc_len;
-        else                        s = 2.0 * top_len + 3.0 * arc_len + 2.0 * side_len + (a + PI) / HALF_PI * arc_len;
+        if (right && !bottom) {
+            s = top_len + (a + HALF_PI) / HALF_PI * arc_len;
+        } else if (right && bottom) {
+            s = top_len + arc_len + side_len + a / HALF_PI * arc_len;
+        } else if (!right && bottom) {
+            s = 2.0 * top_len + 2.0 * arc_len + side_len + (a - HALF_PI) / HALF_PI * arc_len;
+        } else {
+            s = 2.0 * top_len + 3.0 * arc_len + 2.0 * side_len + (a + PI) / HALF_PI * arc_len;
+        }
     } else {
         float dt = p.y - p_min.y;
         float db = p_max.y - p.y;
         float dl = p.x - p_min.x;
         float dr = p_max.x - p.x;
         float m = min(min(dt, db), min(dl, dr));
-        if (m == dt)      s = clamp(p.x - ic_min.x, 0.0, top_len);
-        else if (m == dr) s = top_len + arc_len + clamp(p.y - ic_min.y, 0.0, side_len);
-        else if (m == db) s = top_len + 2.0 * arc_len + side_len + clamp(ic_max.x - p.x, 0.0, top_len);
-        else              s = 2.0 * top_len + 3.0 * arc_len + side_len + clamp(ic_max.y - p.y, 0.0, side_len);
+        if (m == dt) {
+            s = clamp(p.x - ic_min.x, 0.0, top_len);
+        } else if (m == dr) {
+            s = top_len + arc_len + clamp(p.y - ic_min.y, 0.0, side_len);
+        } else if (m == db) {
+            s = top_len + 2.0 * arc_len + side_len + clamp(ic_max.x - p.x, 0.0, top_len);
+        } else {
+            s = 2.0 * top_len + 3.0 * arc_len + side_len + clamp(ic_max.y - p.y, 0.0, side_len);
+        }
     }
     return fract(s / per);
 }
