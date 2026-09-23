@@ -2,14 +2,13 @@ cmake_minimum_required(VERSION 3.15...3.27)
 
 project(slimgui LANGUAGES CXX)
 
-# Keep the size-oriented Release build on non-MSVC toolchains.  MSVC's /Os
-# only selects a size preference; it does not enable the complete optimization
-# set, so Windows wheels use /O2 and opt nanobind out of its trailing /Os.
+# Release builds optimize for speed on every toolchain.  nanobind_add_module
+# must receive NOMINSIZE, otherwise it appends -Os (/Os on MSVC) after these
+# flags and the later option wins.
 if(MSVC)
   set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG" CACHE STRING "" FORCE)
-  set(SLIMGUI_OPTIMIZE_OPTIONS NOMINSIZE)
 else()
-  set(CMAKE_CXX_FLAGS_RELEASE "-Os -DNDEBUG" CACHE STRING "" FORCE)
+  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "" FORCE)
 endif()
 
 if(MSVC)
@@ -49,7 +48,7 @@ nanobind_add_module(slimgui_ext
   STABLE_ABI
   NB_DOMAIN slimgui_abi_domain
   LTO
-  ${SLIMGUI_OPTIMIZE_OPTIONS}
+  NOMINSIZE
 
   bindings/module.cpp
   bindings/imgui_types.cpp
